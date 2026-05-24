@@ -1379,21 +1379,35 @@ function convertDZMM(data) {
     chunkMap[c.id] = c;
   }
   
-  // Find root chunk(s) - those without parent
+  // Find root chunk(s) — those without parent
   const roots = chunks.filter(c => !c.parent);
   const rootId = uid();
   const rootMsg = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
   const messageMap = { [rootId]: rootMsg };
   
-  // Walk the DZMM tree: build ALL nodes (main + branches), return leaf ID if on active path
-  function walk(chunkId, parentId, isActive) {
+  // Cache: chunkId → [nodeIds] so we don't create duplicates when reached from multiple parents
+  const chunkNodeCache = {};
+  
+  // Walk the DZMM tree: build nodes for EVERY chunk reachable from roots
+  // Phase 1: walk all chunks and create node IDs (with dedup via chunkNodeCache)
+  function walkAll(chunkId, parentId) {
     const chunk = chunkMap[chunkId];
-    if (!chunk) return null;
+    if (!chunk) return;
+    
+    // If already processed, just re-attach
+    if (chunkNodeCache[chunkId]) {
+      const cachedIds = chunkNodeCache[chunkId];
+      if (cachedIds.length > 0 && !messageMap[parentId].children.includes(cachedIds[0])) {
+        messageMap[parentId].children.push(cachedIds[0]);
+      }
+      return;
+    }
+    
     const msgs = chunkMsgs[chunkId] || [];
-    
+    const nodeIds = [];
     let lastId = parentId;
-    let leafId = null;
     
+    // Merge consecutive same-role messages in this chunk into single user/assistant nodes
     if (msgs.length > 0) {
       let userContent = '', assistantContent = '';
       for (const m of msgs) {
@@ -1407,7 +1421,7 @@ function convertDZMM(data) {
         const userMsg = {
           id: uid(), role: 'user', content: userText,
           parentId: lastId, children: [],
-          title: userText.substring(0, 30) + (userText.length > 30 ? '...' : ''),
+          title: (userText.substring(0, 30) + (userText.length > 30 ? '...' : '')).replace(/\n/g, ' '),
           wordCount: countWords(userContent),
           versions: [{ content: userContent, timestamp: Date.now(), reason: 'import' }],
           activeVersion: 0, files: [], createdAt: Date.now()
@@ -1415,7 +1429,7 @@ function convertDZMM(data) {
         messageMap[userMsg.id] = userMsg;
         messageMap[lastId].children.push(userMsg.id);
         lastId = userMsg.id;
-        if (isActive) leafId = userMsg.id;
+        nodeIds.push(userMsg.id);
       }
       if (assistantContent) {
         const asstText = String(assistantContent || '');
@@ -1430,36 +1444,78 @@ function convertDZMM(data) {
         messageMap[asstMsg.id] = asstMsg;
         messageMap[lastId].children.push(asstMsg.id);
         lastId = asstMsg.id;
-        if (isActive) leafId = asstMsg.id;
+        nodeIds.push(asstMsg.id);
       }
     }
     
-    // Process children: active child gets isActive=true, others get isActive=false
-    const children = chunk.children || [];
-    const activeChildId = children.find(c => chunkMap[c] && chunkMap[c].active);
+    chunkNodeCache[chunkId] = nodeIds;
+    
+    // Walk child chunks — they attach to lastId
+    const children = (chunk.children || []).filter(c => chunkMap[c]);
     for (const childId of children) {
-      const childActive = (childId === activeChildId) && isActive;
-      const childLeaf = walk(childId, lastId, childActive);
-      if (childLeaf && isActive && childActive) leafId = childLeaf;
+      walkAll(childId, lastId);
+    }
+  }
+  
+  // Phase 1: walk everything
+  for (const r of roots) {
+    walkAll(r.id, rootId);
+  }
+  
+  // Phase 2: build activePath by following 'active' flags
+  let activeLeafId = null;
+  function walkActive(chunkId, parentId, nodeSideIds) {
+    const chunk = chunkMap[chunkId];
+    if (!chunk) return null;
+    
+    const nodeIds = chunkNodeCache[chunkId] || [];
+    let lastId = parentId;
+    let leaf = null;
+    
+    // Walk through the nodes for this chunk
+    for (const nid of nodeIds) {
+      lastId = nid;
+      leaf = nid;
     }
     
-    return leafId || (isActive ? lastId : null);
+    // If this chunk has NO messages (empty chunk), but has children, recurse into children
+    if (nodeIds.length === 0) {
+      // Recurse into children directly
+      const children = (chunk.children || []).filter(c => chunkMap[c]);
+      const activeChild = children.find(c => chunkMap[c] && chunkMap[c].active);
+      for (const childId of children) {
+        if (childId === activeChild) {
+          const childLeaf = walkActive(childId, lastId, nodeSideIds);
+          if (childLeaf) leaf = childLeaf;
+        }
+      }
+      return leaf;
+    }
+    
+    // Recurse into children
+    const children = (chunk.children || []).filter(c => chunkMap[c]);
+    const activeChild = children.find(c => chunkMap[c] && chunkMap[c].active);
+    for (const childId of children) {
+      if (childId === activeChild) {
+        const childLeaf = walkActive(childId, lastId, nodeSideIds);
+        if (childLeaf) leaf = childLeaf;
+      }
+    }
+    
+    return leaf;
   }
   
-  // Start walking from roots
-  let activeLeafId = null;
   for (const r of roots) {
-    // Find which root is active
-    const isActiveRoot = chunkMap[r] && chunkMap[r].active;
-    const leaf = walk(r.id, rootId, isActiveRoot);
-    if (leaf && isActiveRoot) activeLeafId = leaf;
+    if (chunkMap[r] && chunkMap[r].active) {
+      activeLeafId = walkActive(r.id, rootId, nodeSideIds);
+    }
   }
   
-  // Build active path from the active leaf
+  // Build activePath
   let convActivePath;
-  const activePath = activeLeafId ? getBranchPathFromMap(messageMap, rootId, activeLeafId) : [rootId];
-  if (!activePath || activePath.length === 0) {
-    // Fallback: follow first child
+  const activePath = activeLeafId ? getBranchPathFromMap(messageMap, rootId, activeLeafId) : null;
+  if (!activePath || activePath.length <= 1) {
+    // Fallback: follow first child from root
     const path = [rootId];
     let cur = rootId;
     while (true) {
