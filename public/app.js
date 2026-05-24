@@ -253,8 +253,14 @@ async function init() {
   $('btn-close-settings').addEventListener('click', () => toggleSettings(false));
   $('btn-branch').addEventListener('click', openBranchDrawer);
   $('btn-close-branch').addEventListener('click', closeBranchDrawer);
-  $('btn-zoom-in').addEventListener('click', () => { branchZoom = branchZoom + 0.08; applyBranchZoom(); updateZoomLabel(); });
-  $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.3); applyBranchZoom(); updateZoomLabel(); });
+  $('btn-zoom-in').addEventListener('click', () => { branchZoom = branchZoom + 0.08; applyBranchZoom(); updateZoomInput(); });
+  $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.3); applyBranchZoom(); updateZoomInput(); });
+  $('zoom-input').addEventListener('change', () => {
+    const v = parseInt($('zoom-input').value) / 100;
+    if (v > 0) { branchZoom = v; applyBranchZoom(); }
+    updateZoomInput();
+  });
+  $('zoom-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('zoom-input').blur(); });
   $('btn-export').addEventListener('click', exportConversation);
   $('btn-import').addEventListener('click', () => { document.getElementById('import-file-input').click(); });
   document.getElementById('import-file-input').addEventListener('change', importConversation);
@@ -264,9 +270,9 @@ const applyBranchZoom = function() {
   const svg = document.querySelector('.branch-svg');
   if (svg) { svg.style.transform = `scale(${branchZoom})`; svg.style.transformOrigin = 'top left'; }
 };
-const updateZoomLabel = function() {
-  const lbl = document.getElementById('zoom-label');
-  if (lbl) lbl.textContent = Math.round(branchZoom * 100) + '%';
+const updateZoomInput = function() {
+  const inp = document.getElementById('zoom-input');
+  if (inp) inp.value = Math.round(branchZoom * 100);
 };
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
   settingsPanel.querySelector('.settings-backdrop').addEventListener('click', () => toggleSettings(false));
@@ -986,6 +992,7 @@ function updateMessageContent(msgId, content, reasoning) {
 function openBranchDrawer() {
   const conv = currentConv();
   if (!conv) return;
+  updateZoomInput();
   const drawer = document.getElementById('branch-drawer');
   const tree = document.getElementById('branch-tree');
   const info = document.getElementById('branch-info');
@@ -996,6 +1003,21 @@ function openBranchDrawer() {
   info.textContent = `分支总览 — ${chainLen} 条消息 · ${totalWords} 字`;
 
   tree.innerHTML = renderTreeSVG(conv);
+  
+  // Center on root node after render
+  setTimeout(() => {
+    const container = tree.closest('.branch-drawer-content');
+    if (!container) return;
+    // Root node is always the first .tree-node in the SVG
+    const rootNode = tree.querySelector('.tree-node');
+    if (rootNode) {
+      const cRect = container.getBoundingClientRect();
+      const nRect = rootNode.getBoundingClientRect();
+      // Scroll to center root in the viewport
+      container.scrollTop = Math.max(0, (nRect.top - cRect.top) + container.scrollTop - cRect.height / 2 + nRect.height / 2);
+      container.scrollLeft = Math.max(0, (nRect.left - cRect.left) + container.scrollLeft - cRect.width / 2 + nRect.width / 2);
+    }
+  }, 100);
 }
 
 let branchZoom = 1;
