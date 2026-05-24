@@ -1010,7 +1010,6 @@ function closeBranchDrawer() {
 
 // Pinch-zoom for mobile
 let pinchState = null;
-let longPressTimer = null;
 function initPinchZoom() {
   const container = document.querySelector('.branch-drawer-body');
   if (!container) return;
@@ -1020,10 +1019,6 @@ function initPinchZoom() {
   // Desktop: Alt+wheel zoom, mouse drag pan
   container.addEventListener('wheel', onWheelZoom, {passive:false});
   container.addEventListener('mousedown', onMouseDown);
-  // Mobile long-press for color
-  container.addEventListener('touchstart', onLongPressStart, {passive:false});
-  container.addEventListener('touchend', onLongPressEnd);
-  container.addEventListener('touchmove', onLongPressCancel);
 }
 
 function removePinchListeners() {
@@ -1034,11 +1029,7 @@ function removePinchListeners() {
   container.removeEventListener('touchend', onPinchEnd);
   container.removeEventListener('wheel', onWheelZoom);
   container.removeEventListener('mousedown', onMouseDown);
-  container.removeEventListener('touchstart', onLongPressStart);
-  container.removeEventListener('touchend', onLongPressEnd);
-  container.removeEventListener('touchmove', onLongPressCancel);
   pinchState = null;
-  longPressTimer = null;
 }
 
 // Alt+wheel zoom on desktop
@@ -1073,25 +1064,6 @@ function onMouseMove(e) {
   document.querySelector('.branch-drawer-body').scrollTop = mouseDrag.sy + dy;
 }
 function onMouseUp() { mouseDrag = null; window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); }
-
-// Mobile long-press for node color
-function onLongPressStart(e) {
-  if (e.touches.length !== 1) return;
-  longPressTimer = setTimeout(() => {
-    const touch = e.touches[0];
-    const el = document.elementFromPoint(touch.clientX, touch.clientY);
-    const g = el?.closest('.tree-node');
-    if (g) {
-      const onclick = g.getAttribute('onclick') || '';
-      const idMatch = onclick.match(/'([^']+)'/);
-      if (idMatch && window.svgNodeColor) {
-        window.svgNodeColor(idMatch[1]);
-      }
-    }
-  }, 600);
-}
-function onLongPressEnd() { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } }
-function onLongPressCancel() { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } }
 
 function onPinchStart(e) {
   if (e.touches.length !== 2) return;
