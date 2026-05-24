@@ -1207,10 +1207,11 @@ function renderTreeSVG(conv) {
     
     const bx = pos.x - NODE_W/2;
     const by = pos.y - NODE_H/2;
+    const fillColor = node.color || (isActive ? 'var(--primary)' : 'var(--bg2)');
     
     svg += `<g class="tree-node" onclick="svgNodeClick('${nodeId}')" oncontextmenu="event.preventDefault();svgNodeRename('${nodeId}')" transform="translate(${bx},${by})">
       <rect x="0" y="0" width="${NODE_W}" height="${NODE_H}" rx="8" 
-        fill="${isActive ? 'var(--primary)' : 'var(--bg2)'}" 
+        fill="${fillColor}" 
         stroke="${isActive ? 'var(--primary)' : 'var(--border)'}" 
         stroke-width="${isActive ? 1.5 : 1}" filter="url(#shadow)"/>
       <text x="8" y="18" font-size="11" font-weight="${isActive ? 'bold' : 'normal'}" 
@@ -1281,7 +1282,29 @@ const NODE_COLORS = [
 ];
 
 window.svgNodeRename = function(nodeId) {
-  window.svgNodeColor(nodeId);
+  const conv = currentConv();
+  if (!conv) return;
+  const msg = getMsg(conv, nodeId);
+  if (!msg) return;
+  const curColor = msg.color ? NODE_COLORS.findIndex(c => c.value === msg.color) : 0;
+  const input = prompt(
+    '右键菜单：\n• 选色: 输入 0-7 (当前:' + NODE_COLORS[curColor].name + ')\n• 改名: 直接输入新名称\n\n0.默认 1.红 2.绿 3.蓝 4.黄 5.紫 6.橙 7.灰',
+    msg.title || ''
+  );
+  if (input === null) return;
+  const n = parseInt(input);
+  if (!isNaN(n) && n >= 0 && n <= 7) {
+    msg.color = NODE_COLORS[n].value;
+    save();
+    openBranchDrawer();
+    return;
+  }
+  if (input.trim()) {
+    msg.title = input.trim();
+    save();
+    openBranchDrawer();
+    renderMessages();
+  }
 };
 
 window.svgNodeColor = function(nodeId) {
