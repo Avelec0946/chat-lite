@@ -255,6 +255,9 @@ async function init() {
   $('btn-close-branch').addEventListener('click', closeBranchDrawer);
   $('btn-zoom-in').addEventListener('click', () => { branchZoom = Math.min(branchZoom * 1.3, 3); applyBranchZoom(); });
   $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom / 1.3, 0.3); applyBranchZoom(); });
+  $('btn-export').addEventListener('click', exportConversation);
+  $('btn-import').addEventListener('click', () => { document.getElementById('import-file-input').click(); });
+  document.getElementById('import-file-input').addEventListener('change', importConversation);
   document.querySelector('#branch-drawer .branch-drawer-backdrop').addEventListener('click', closeBranchDrawer);
 
 function applyBranchZoom() {
@@ -1267,6 +1270,54 @@ document.addEventListener('click', (e) => {
     }
   }
 });
+
+// ===== Import / Export =====
+function exportConversation() {
+  const conv = currentConv();
+  if (!conv) return;
+  const data = { version: 2, exportedAt: new Date().toISOString(), conversation: conv };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `chat-lite-${conv.title || 'conversation'}-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function importConversation(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    try {
+      const data = JSON.parse(ev.target.result);
+      let conv = data.conversation || data;
+      // Basic validation
+      if (!conv.id || !conv.messageMap || !conv.activePath) {
+        // Try migrating from v1 format
+        if (conv.messages && Array.isArray(conv.messages)) {
+          migrateV1toV2(conv);
+        } else {
+          alert('无效的对话文件');
+          return;
+        }
+      }
+      // Ensure unique ID
+      conv.id = uid();
+      state.conversations.push(conv);
+      state.currentId = conv.id;
+      save();
+      renderSidebar();
+      renderMessages();
+      if (conv.model) modelSelect.value = conv.model;
+    } catch (err) {
+      alert('文件解析失败: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+}
 
 // ===== Start =====
 document.addEventListener('DOMContentLoaded', init);
