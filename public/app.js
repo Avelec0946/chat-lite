@@ -253,7 +253,7 @@ async function init() {
   $('btn-close-settings').addEventListener('click', () => toggleSettings(false));
   $('btn-branch').addEventListener('click', openBranchDrawer);
   $('btn-close-branch').addEventListener('click', closeBranchDrawer);
-  $('btn-zoom-in').addEventListener('click', () => { branchZoom = Math.min(branchZoom + 0.08, 1.8); applyBranchZoom(); updateZoomLabel(); });
+  $('btn-zoom-in').addEventListener('click', () => { branchZoom = branchZoom + 0.08; applyBranchZoom(); updateZoomLabel(); });
   $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.3); applyBranchZoom(); updateZoomLabel(); });
   $('btn-export').addEventListener('click', exportConversation);
   $('btn-import').addEventListener('click', () => { document.getElementById('import-file-input').click(); });
