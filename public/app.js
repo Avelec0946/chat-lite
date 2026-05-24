@@ -996,27 +996,33 @@ function openBranchDrawer() {
 
   tree.innerHTML = renderTreeSVG(conv);
   
-  // Center on root node after render
+  // Center on root node and set zoom origin
   setTimeout(() => {
+    const svg = tree.querySelector('.branch-svg');
     const container = tree.closest('.branch-drawer-content');
-    if (!container) return;
-    // Root node is always the first .tree-node in the SVG
-    const rootNode = tree.querySelector('.tree-node');
-    if (rootNode) {
-      const cRect = container.getBoundingClientRect();
-      const nRect = rootNode.getBoundingClientRect();
-      // Scroll to center root in the viewport
-      container.scrollTop = Math.max(0, (nRect.top - cRect.top) + container.scrollTop - cRect.height / 2 + nRect.height / 2);
-      container.scrollLeft = Math.max(0, (nRect.left - cRect.left) + container.scrollLeft - cRect.width / 2 + nRect.width / 2);
-    }
-  }, 100);
+    if (!svg || !container) return;
+    const rootNode = svg.querySelector('.tree-node');
+    if (!rootNode) return;
+    // Get root node position in the SVG coordinate system
+    const transform = rootNode.getAttribute('transform') || '';
+    const tx = parseFloat((transform.match(/translate\(([^,]+),/) || [])[1]) || 0;
+    const ty = parseFloat((transform.match(/,\s*([^)]+)\)/) || [])[1]) || 0;
+    // Set zoom origin to root node center
+    svg.style.transformOrigin = `${tx + 90}px ${ty + 22}px`;
+    // Scroll container to center root
+    const cRect = container.getBoundingClientRect();
+    // Root position in viewport = position_in_svg * zoom + scroll offset
+    const rootX = (tx + 90) * branchZoom - cRect.width / 2;
+    const rootY = (ty + 22) * branchZoom - cRect.height / 2;
+    container.scrollLeft = Math.max(0, rootX);
+    container.scrollTop = Math.max(0, rootY);
+  }, 150);
 }
 
 let branchZoom = 1;
 
 function closeBranchDrawer() {
   document.getElementById('branch-drawer').style.display = 'none';
-  branchZoom = 1;
 }
 
 // ===== SVG Tree Layout & Rendering =====
