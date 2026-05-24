@@ -1,0 +1,10 @@
+{
+  "apiBaseUrl": "https://api.deepseek.com/v1",
+  "apiKey": "sk-717eec79325e409e9f3c47da8ed0538c",
+  "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+  "defaultModel": "deepseek-v4-flash",
+  "maxTokens": 4096,
+  "temperature": 0.7,
+  "extraParams": {},
+  "port": 7000
+}
