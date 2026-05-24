@@ -266,7 +266,7 @@ const applyBranchZoom = function() {
 };
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
   settingsPanel.querySelector('.settings-backdrop').addEventListener('click', () => toggleSettings(false));
-  sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+  sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('hidden'));
   $('theme-checkbox').addEventListener('change', e => {
     document.body.classList.toggle('dark', e.target.checked);
   });
@@ -1293,9 +1293,9 @@ function formatSize(bytes) {
 
 // ===== Sidebar close on mobile =====
 document.addEventListener('click', (e) => {
-  if (window.innerWidth <= 768 && sidebar.classList.contains('open')) {
-    if (!sidebar.contains(e.target) && e.target !== sidebarToggle) {
-      sidebar.classList.remove('open');
+  if (window.innerWidth <= 768 && !sidebar.classList.contains('hidden')) {
+    if (!sidebar.contains(e.target) && e.target !== sidebarToggle && !sidebarToggle.contains(e.target)) {
+      sidebar.classList.add('hidden');
     }
   }
 });
