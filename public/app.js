@@ -996,6 +996,7 @@ function openBranchDrawer() {
 
   tree.innerHTML = renderTreeSVG(conv);
   applyBranchZoom();
+  initPinchZoom();
   // One-time center on open
   setTimeout(applyBranchCenter, 200);
 }
@@ -1004,6 +1005,69 @@ let branchZoom = 1;
 
 function closeBranchDrawer() {
   document.getElementById('branch-drawer').style.display = 'none';
+  removePinchListeners();
+}
+
+// Pinch-zoom for mobile
+let pinchState = null;
+function initPinchZoom() {
+  const container = document.querySelector('.branch-drawer-body');
+  if (!container) return;
+  container.addEventListener('touchstart', onPinchStart, {passive:false});
+  container.addEventListener('touchmove', onPinchMove, {passive:false});
+  container.addEventListener('touchend', onPinchEnd);
+}
+
+function removePinchListeners() {
+  const container = document.querySelector('.branch-drawer-body');
+  if (!container) return;
+  container.removeEventListener('touchstart', onPinchStart);
+  container.removeEventListener('touchmove', onPinchMove);
+  container.removeEventListener('touchend', onPinchEnd);
+  pinchState = null;
+}
+
+function onPinchStart(e) {
+  if (e.touches.length !== 2) return;
+  e.preventDefault();
+  const t1 = e.touches[0], t2 = e.touches[1];
+  pinchState = {
+    dist: Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY),
+    midX: (t1.clientX + t2.clientX) / 2,
+    midY: (t1.clientY + t2.clientY) / 2,
+    startZoom: branchZoom,
+    container: document.querySelector('.branch-drawer-body'),
+    svg: document.querySelector('.branch-svg')
+  };
+}
+
+function onPinchMove(e) {
+  if (!pinchState || e.touches.length !== 2) return;
+  e.preventDefault();
+  const t1 = e.touches[0], t2 = e.touches[1];
+  const newDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+  const scale = newDist / pinchState.dist;
+  const newZoom = Math.max(0.3, pinchState.startZoom * scale);
+  
+  // Calculate scroll offset to keep the pinch midpoint stable
+  const oldScrollLeft = pinchState.container.scrollLeft;
+  const oldScrollTop = pinchState.container.scrollTop;
+  
+  branchZoom = newZoom;
+  applyBranchZoom();
+  updateZoomInput();
+  
+  // Adjust scroll to keep midpoint stationary
+  if (pinchState.svg) {
+    const containerRect = pinchState.container.getBoundingClientRect();
+    const scaleRatio = newZoom / pinchState.startZoom;
+    pinchState.container.scrollLeft = (oldScrollLeft + (pinchState.midX - containerRect.left)) * scaleRatio - (pinchState.midX - containerRect.left);
+    pinchState.container.scrollTop = (oldScrollTop + (pinchState.midY - containerRect.top)) * scaleRatio - (pinchState.midY - containerRect.top);
+  }
+}
+
+function onPinchEnd() {
+  pinchState = null;
 }
 
 // ===== SVG Tree Layout & Rendering =====
