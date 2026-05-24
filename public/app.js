@@ -951,100 +951,143 @@ function openBranchDrawer() {
 
   const totalWords = computeBranchWords(conv, conv.rootId);
   const chainLen = getActiveChain(conv).filter(m => m && m.role !== 'system').length;
-  info.textContent = `当前分支 ${chainLen} 条消息 · ${totalWords} 字`;
+  info.textContent = `分支总览 — ${chainLen} 条消息 · ${totalWords} 字`;
 
-  tree.innerHTML = '';
-  const treeEl = buildTreeHTML(conv, conv.rootId, conv.activePath, 0);
-  if (treeEl) tree.appendChild(treeEl);
+  tree.innerHTML = renderTreeSVG(conv);
 }
 
 function closeBranchDrawer() {
   document.getElementById('branch-drawer').style.display = 'none';
 }
 
-function buildTreeHTML(conv, nodeId, activePath, depth) {
-  const msg = conv.messageMap[nodeId];
-  if (!msg) return null;
-
-  const isSystemRoot = msg.role === 'system' && !msg.parentId;
-  const skipMe = msg.role === 'system' && !isSystemRoot;
+// ===== SVG Tree Layout & Rendering =====
+function renderTreeSVG(conv) {
+  const NODE_W = 150, NODE_H = 50;
+  const H_GAP = 24, V_GAP = 32;
   
-  if (!isSystemRoot && skipMe) return null;
-
-  let div = null;
-  if (!isSystemRoot) {
-    const isActive = activePath.includes(nodeId);
-    const hasBranch = msg.children && msg.children.length > 1;
-
-    div = document.createElement('div');
-    div.className = `branch-node${isActive ? ' active' : ''}`;
-    div.style.paddingLeft = Math.min(depth * 16, 80) + 'px';
-
-    const icon = msg.role === 'user' ? '👤' : '🤖';
-    const title = msg.title || (msg.content ? msg.content.substring(0, 20) + (msg.content.length > 20 ? '...' : '') : '(空)');
-    const wc = msg.wordCount || countWords(msg.content || '');
-
-    div.innerHTML = `<span class="branch-icon">${icon}</span>
-      <span class="branch-title">${escapeHtml(title)}</span>
-      <span class="branch-wc">${wc}</span>`;
-
-    div.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const newPath = getBranchPath(conv, nodeId);
-      conv.activePath = newPath;
-      save();
-      renderMessages();
-      renderBreadcrumb(conv);
-      closeBranchDrawer();
-    });
-
-    div.addEventListener('dblclick', (e) => {
-      e.stopPropagation();
-      const titleSpan = div.querySelector('.branch-title');
-      const oldTitle = msg.title || '';
-      const input = document.createElement('input');
-      input.className = 'branch-rename-input';
-      input.value = oldTitle;
-      input.addEventListener('blur', () => {
-        msg.title = input.value.trim() || oldTitle;
-        save();
-        openBranchDrawer();
-        renderMessages();
-      });
-      input.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter') input.blur();
-        if (ev.key === 'Escape') { input.value = oldTitle; input.blur(); }
-      });
-      titleSpan.innerHTML = '';
-      titleSpan.appendChild(input);
-      input.focus();
-      input.select();
-    });
-
-    if (hasBranch) div.classList.add('has-branch');
-
-    // Recurse children
-    if (msg.children && msg.children.length > 0) {
-      for (const childId of msg.children) {
-        const childEl = buildTreeHTML(conv, childId, activePath, depth + 1);
-        if (childEl) div.appendChild(childEl);
-      }
+  // Step 1: collect non-system nodes into levels, compute subtree widths
+  const levels = {}; // depth -> [{id, msg, subtreeW}]
+  const parentOf = {}; // childId -> parentId
+  
+  function measure(nodeId, depth) {
+    const msg = conv.messageMap[nodeId];
+    if (!msg) return 0;
+    const isHidden = msg.role === 'system' && msg.parentId !== null;
+    const children = msg.children || [];
+    let childW = 0;
+    for (const cid of children) {
+      parentOf[cid] = nodeId;
+      const w = measure(cid, isHidden ? depth : depth + 1);
+      childW += w + (w > 0 ? H_GAP : 0);
     }
-  } else {
-    // System root: just recurse children, don't render self
-    if (msg.children && msg.children.length > 0) {
-      for (const childId of msg.children) {
-        const childEl = buildTreeHTML(conv, childId, activePath, depth);
-        if (childEl) {
-          if (!div) div = document.createElement('div');
-          div.appendChild(childEl);
-        }
-      }
+    childW = Math.max(0, childW - H_GAP);
+    if (!isHidden) {
+      if (!levels[depth]) levels[depth] = [];
+      levels[depth].push({ id: nodeId, msg, subtreeW: Math.max(childW, NODE_W) });
+    }
+    return Math.max(childW, NODE_W);
+  }
+  
+  measure(conv.rootId, 0);
+  
+  const maxDepth = Math.max(...Object.keys(levels).map(Number), 0);
+  if (maxDepth === 0) return '<div style="padding:20px;color:var(--text2)">暂无分支</div>';
+  
+  // Step 2: assign x,y positions
+  const positions = {};
+  for (let d = 0; d <= maxDepth; d++) {
+    const nodes = levels[d] || [];
+    if (nodes.length === 0) continue;
+    // Spread nodes evenly, using subtree widths
+    const totalW = nodes.reduce((sum, n) => sum + n.subtreeW, 0) + (nodes.length - 1) * H_GAP;
+    let x = 0;
+    for (const node of nodes) {
+      positions[node.id] = {
+        x: x + node.subtreeW / 2,
+        y: d * (NODE_H + V_GAP) + NODE_H / 2
+      };
+      x += node.subtreeW + H_GAP;
     }
   }
-
-  return div ? (div.children.length > 0 || !isSystemRoot ? div : null) : null;
+  
+  // Step 3: build SVG
+  const svgW = Math.max(
+    Object.values(positions).reduce((max, p) => Math.max(max, p.x + NODE_W/2 + 20), 0),
+    300
+  );
+  const svgH = (maxDepth + 1) * (NODE_H + V_GAP) + 20;
+  
+  let svg = `<svg class="branch-svg" viewBox="0 0 ${svgW} ${svgH}" width="${svgW}" height="${svgH}">`;
+  svg += `<defs><filter id="shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.1"/></filter></defs>`;
+  
+  // Draw edges
+  for (const [childId, parentId] of Object.entries(parentOf)) {
+    const pp = positions[parentId];
+    const cp = positions[childId];
+    if (!pp || !cp) continue;
+    const pMsg = conv.messageMap[parentId];
+    if (pMsg && pMsg.role === 'system' && !pMsg.parentId) continue; // skip root edges
+    const isActiveEdge = conv.activePath.includes(parentId) && conv.activePath.includes(childId);
+    svg += `<line x1="${pp.x}" y1="${pp.y + NODE_H/2}" x2="${cp.x}" y2="${cp.y - NODE_H/2}" 
+      stroke="${isActiveEdge ? 'var(--primary)' : 'var(--text2)'}" stroke-width="${isActiveEdge ? 2 : 1}" opacity="${isActiveEdge ? 0.8 : 0.3}"/>`;
+  }
+  
+  // Draw nodes
+  for (const [nodeId, pos] of Object.entries(positions)) {
+    const msg = conv.messageMap[nodeId];
+    if (!msg) continue;
+    const isActive = conv.activePath.includes(nodeId);
+    const hasChildren = (msg.children || []).length > 0;
+    const icon = msg.role === 'user' ? '👤' : '🤖';
+    const title = (msg.title || msg.content || '').substring(0, 14) || '(空)';
+    const wc = msg.wordCount || countWords(msg.content || '');
+    
+    const bx = pos.x - NODE_W/2;
+    const by = pos.y - NODE_H/2;
+    
+    svg += `<g class="tree-node" onclick="svgNodeClick('${nodeId}')" oncontextmenu="event.preventDefault();svgNodeRename('${nodeId}')" transform="translate(${bx},${by})">
+      <rect x="0" y="0" width="${NODE_W}" height="${NODE_H}" rx="8" 
+        fill="${isActive ? 'var(--primary)' : 'var(--bg2)'}" 
+        stroke="${isActive ? 'var(--primary)' : 'var(--border)'}" 
+        stroke-width="${isActive ? 1.5 : 1}" filter="url(#shadow)"/>
+      <text x="8" y="18" font-size="11" font-weight="${isActive ? 'bold' : 'normal'}" 
+        fill="${isActive ? '#fff' : 'var(--text)'}" font-family="inherit">${icon} ${escapeSvg(title)}</text>
+      <text x="8" y="36" font-size="10" fill="${isActive ? 'rgba(255,255,255,0.7)' : 'var(--text2)'}" font-family="inherit">${wc}字${hasChildren ? ' ▾' : ''}</text>
+    </g>`;
+  }
+  
+  svg += '</svg>';
+  return svg;
 }
+
+function escapeSvg(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+window.svgNodeClick = function(nodeId) {
+  const conv = currentConv();
+  if (!conv) return;
+  const newPath = getBranchPath(conv, nodeId);
+  conv.activePath = newPath;
+  save();
+  renderMessages();
+  renderBreadcrumb(conv);
+  closeBranchDrawer();
+};
+
+window.svgNodeRename = function(nodeId) {
+  const conv = currentConv();
+  if (!conv) return;
+  const msg = getMsg(conv, nodeId);
+  if (!msg) return;
+  const newTitle = prompt('重命名节点', msg.title || '');
+  if (newTitle !== null && newTitle.trim()) {
+    msg.title = newTitle.trim();
+    save();
+    openBranchDrawer();
+    renderMessages();
+  }
+};
 
 // ===== File Upload =====
 state.pendingFiles = [];
