@@ -473,7 +473,6 @@ function renderMessages() {
     }
   });
 
-  renderBreadcrumb(conv);
   scrollToBottom();
 }
 
