@@ -1368,15 +1368,17 @@ function convertDZMM(data) {
     if (msgs.length > 0) {
       let userContent = '', assistantContent = '';
       for (const m of msgs) {
-        if (m.role === 'user') userContent += (userContent ? '\n\n' : '') + (m.content || '');
-        else if (m.role === 'assistant') assistantContent += (assistantContent ? '\n\n' : '') + (m.content || '');
+        const ct = (typeof m.content === 'string' ? m.content : String(m.content || ''));
+        if (m.role === 'user') userContent += (userContent ? '\n\n' : '') + ct;
+        else if (m.role === 'assistant') assistantContent += (assistantContent ? '\n\n' : '') + ct;
       }
       
       if (userContent) {
+        const userText = String(userContent || '');
         const userMsg = {
-          id: uid(), role: 'user', content: userContent,
+          id: uid(), role: 'user', content: userText,
           parentId: lastId, children: [],
-          title: (userContent || '').substring(0, 30) + (userContent.length > 30 ? '...' : ''),
+          title: userText.substring(0, 30) + (userText.length > 30 ? '...' : ''),
           wordCount: countWords(userContent),
           versions: [{ content: userContent, timestamp: Date.now(), reason: 'import' }],
           activeVersion: 0, files: [], createdAt: Date.now()
@@ -1387,8 +1389,9 @@ function convertDZMM(data) {
         if (isActive) leafId = userMsg.id;
       }
       if (assistantContent) {
+        const asstText = String(assistantContent || '');
         const asstMsg = {
-          id: uid(), role: 'assistant', content: assistantContent,
+          id: uid(), role: 'assistant', content: asstText,
           parentId: lastId, children: [],
           title: '回复',
           wordCount: countWords(assistantContent),
