@@ -18,11 +18,20 @@ function save() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       conversations: state.conversations,
-      currentId: state.currentId
+      currentId: state.currentId,
+      version: 2
     }));
   } catch(e) {
     console.warn('Failed to save:', e.message);
   }
+  // Sync to server
+  try {
+    fetch('/api/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversations: state.conversations, currentId: state.currentId })
+    });
+  } catch(e) {}
 }
 
 function loadData() {
@@ -32,8 +41,53 @@ function loadData() {
       const data = JSON.parse(raw);
       state.conversations = data.conversations || [];
       state.currentId = data.currentId || null;
+      // Migrate v1 (array format) to v2 (tree format)
+      if (!data.version || data.version < 2) {
+        for (const conv of state.conversations) {
+          if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) {
+            migrateV1toV2(conv);
+          }
+        }
+      }
     }
   } catch(e) {}
+}
+
+function migrateV1toV2(conv) {
+  const map = {};
+  const oldMsgs = conv.messages || [];
+  if (oldMsgs.length === 0) {
+    const rootId = uid();
+    map[rootId] = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
+    conv.rootId = rootId;
+    conv.activePath = [rootId];
+    conv.messageMap = map;
+    delete conv.messages;
+    return;
+  }
+  // Build tree from linear array
+  const rootId = uid();
+  map[rootId] = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
+  let prevId = rootId;
+  const path = [rootId];
+  for (const m of oldMsgs) {
+    const id = m.id || uid();
+    map[id] = {
+      ...m,
+      parentId: prevId,
+      children: [],
+      wordCount: countWords(m.content || ''),
+      versions: m.versions || [{ content: m.content || '', timestamp: Date.now(), reason: 'original' }],
+      activeVersion: m.activeVersion || 0
+    };
+    map[prevId].children.push(id);
+    prevId = id;
+    path.push(id);
+  }
+  conv.rootId = rootId;
+  conv.activePath = path;
+  conv.messageMap = map;
+  delete conv.messages;
 }
 
 function loadSettings() {
@@ -50,6 +104,14 @@ function saveSettings() {
 
 // ===== Conversation Model =====
 function newConversation() {
+  const msgId = uid();
+  const rootMsg = {
+    id: msgId, role: 'system', content: '',
+    parentId: null, children: [],
+    title: '对话根节点', wordCount: 0,
+    versions: [{ content: '', timestamp: Date.now(), reason: 'original' }],
+    activeVersion: 0, files: [], editing: false, createdAt: Date.now()
+  };
   return {
     id: uid(),
     title: '新对话',
@@ -57,9 +119,47 @@ function newConversation() {
     thinkingEnabled: settings.thinkingEnabled,
     systemPrompt: '',
     userIdentity: '',
-    messages: [],
+    rootId: msgId,
+    activePath: [msgId],
+    messageMap: { [msgId]: rootMsg },
     createdAt: Date.now()
   };
+}
+
+// Tree helpers
+function getMsg(conv, id) { return conv.messageMap[id]; }
+function getActiveChain(conv) {
+  return conv.activePath.map(id => conv.messageMap[id]).filter(Boolean);
+}
+function getLastActiveMsg(conv) {
+  const chain = getActiveChain(conv);
+  return chain[chain.length - 1] || null;
+}
+function countWords(text) { return (text || '').length; }
+function computeBranchWords(conv, fromId) {
+  let total = 0, visited = new Set(), stack = [fromId];
+  while (stack.length) {
+    const id = stack.pop();
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const msg = conv.messageMap[id];
+    if (msg) {
+      total += countWords(msg.content);
+      stack.push(...(msg.children || []));
+    }
+  }
+  return total;
+}
+function getBranchPath(conv, leafId) {
+  const path = [];
+  let current = leafId;
+  while (current) {
+    path.unshift(current);
+    const msg = conv.messageMap[current];
+    if (!msg || !msg.parentId) break;
+    current = msg.parentId;
+  }
+  return path;
 }
 
 // ===== DOM refs =====
@@ -97,24 +197,15 @@ async function init() {
     } else {
       loadData();
     }
-    // Save to server on any change
-    const origSave = save;
-    save = function() {
-      origSave();
-      try {
-        fetch('/api/save', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            conversations: state.conversations,
-            currentId: state.currentId
-          })
-        });
-      } catch(e) {}
-    };
   } catch(e) {
     // Server not available, fall back to localStorage
     loadData();
+  }
+  // Migrate any old-format conversations loaded from server
+  for (const conv of state.conversations) {
+    if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) {
+      migrateV1toV2(conv);
+    }
   }
 
   // Load model list from server
@@ -274,13 +365,22 @@ function renderMessages() {
   messagesEl.innerHTML = '';
   emptyState.style.display = 'none';
 
-  if (!conv || conv.messages.length === 0) {
+  if (!conv || !conv.rootId) {
     emptyState.style.display = 'block';
     return;
   }
 
-  conv.messages.forEach((msg, idx) => {
-    const isLastAssistant = idx === conv.messages.length - 1 && msg.role === 'assistant';
+  const chain = getActiveChain(conv);
+  // Filter out root system message for display
+  const displayMsgs = chain.filter(m => m && m.role !== 'system');
+
+  if (displayMsgs.length === 0) {
+    emptyState.style.display = 'block';
+    return;
+  }
+
+  displayMsgs.forEach((msg, idx) => {
+    const isLastMsg = idx === displayMsgs.length - 1;
     const div = document.createElement('div');
     div.className = `message ${msg.role}${msg.editing ? ' message-editing' : ''}`;
     div.dataset.id = msg.id;
@@ -289,6 +389,7 @@ function renderMessages() {
 
     div.innerHTML = `
       <div class="msg-bubble">
+        ${msg.title && msg.title !== '对话根节点' ? `<div class="msg-title">${escapeHtml(msg.title)}</div>` : ''}
         ${content}
         ${msg.role === 'assistant' && !msg.editing ? `
         <div class="msg-actions">
@@ -304,19 +405,12 @@ function renderMessages() {
 
     messagesEl.appendChild(div);
 
-    // Edit button
     const editBtn = div.querySelector('.edit-btn');
-    if (editBtn) {
-      editBtn.addEventListener('click', () => enterEditMode(msg.id));
-    }
+    if (editBtn) editBtn.addEventListener('click', () => enterEditMode(msg.id));
 
-    // Regenerate button
     const regenBtn = div.querySelector('.regenerate-btn');
-    if (regenBtn) {
-      regenBtn.addEventListener('click', () => regenerate(msg.id));
-    }
+    if (regenBtn) regenBtn.addEventListener('click', () => regenerate(msg.id));
 
-    // Edit-specific handlers
     if (msg.editing) {
       const textarea = div.querySelector('.msg-edit-textarea');
       const saveBtn = div.querySelector('.save-btn');
@@ -324,10 +418,7 @@ function renderMessages() {
       if (textarea) {
         textarea.focus();
         textarea.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            saveEdit(msg.id, textarea.value);
-          }
+          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(msg.id, textarea.value); }
           if (e.key === 'Escape') cancelEdit(msg.id);
         });
       }
@@ -336,6 +427,7 @@ function renderMessages() {
     }
   });
 
+  renderBranchInfo();
   scrollToBottom();
 }
 
@@ -362,6 +454,12 @@ function renderContent(msg) {
   // Markdown content
   const rendered = marked.parse(msg.content || '', { breaks: true, gfm: true });
   html += rendered;
+
+  // Word count
+  const wc = countWords(msg.content || '');
+  if (wc > 0) {
+    html += `<span class="msg-wordcount">${wc}字</span>`;
+  }
 
   // Version info (if multiple versions exist)
   if (msg.versions && msg.versions.length > 1) {
@@ -437,44 +535,43 @@ function scrollToBottom() {
 function enterEditMode(msgId) {
   const conv = currentConv();
   if (!conv) return;
-  const msg = conv.messages.find(m => m.id === msgId);
-  if (msg) {
-    msg.editing = true;
-    renderMessages();
-  }
+  const msg = getMsg(conv, msgId);
+  if (msg) { msg.editing = true; renderMessages(); }
 }
 
 function saveEdit(msgId, newContent) {
   const conv = currentConv();
-  if (!conv) return;
-  const msg = conv.messages.find(m => m.id === msgId);
+  if (!conv || !conv.messageMap) return;
+  const msg = getMsg(conv, msgId);
   if (!msg) return;
 
   if (msg.role === 'assistant') {
-    // Save as new version
     const prevContent = msg.content;
     msg.versions.push({ content: prevContent, timestamp: Date.now(), reason: 'edited' });
     msg.activeVersion = 0;
     msg.content = newContent;
-  } else {
-    // User message - save and optionally resend chain
-    msg.content = newContent;
-    // Rebuild context from this message onward
-    const idx = conv.messages.indexOf(msg);
-    if (idx >= 0) {
-      // Remove messages after this one
-      const suffix = conv.messages.slice(idx + 1);
-      const lastAssistant = suffix.find(m => m.role === 'assistant');
-      // If there's a subsequent assistant response, re-gen
-      if (lastAssistant) {
-        conv.messages = conv.messages.slice(0, idx + 1);
-        save();
-        renderMessages();
-        sendFromMessage(conv.messages);
-        msg.editing = false;
-        return;
-      }
-    }
+    msg.wordCount = countWords(newContent);
+    msg.editing = false;
+    save();
+    renderMessages();
+    return;
+  }
+
+  // User message - edit and branch if needed
+  msg.content = newContent;
+  msg.wordCount = countWords(newContent);
+  msg.title = newContent.substring(0, 30) + (newContent.length > 30 ? '...' : '');
+
+  const msgIdx = conv.activePath.indexOf(msgId);
+  if (msgIdx >= 0 && msgIdx < conv.activePath.length - 1) {
+    // There are messages after this - truncate and resend
+    conv.activePath = conv.activePath.slice(0, msgIdx + 1);
+    save();
+    renderMessages();
+    msg.editing = false;
+    const context = buildContext(conv);
+    sendFromMessage(context);
+    return;
   }
 
   msg.editing = false;
@@ -485,7 +582,7 @@ function saveEdit(msgId, newContent) {
 function cancelEdit(msgId) {
   const conv = currentConv();
   if (!conv) return;
-  const msg = conv.messages.find(m => m.id === msgId);
+  const msg = getMsg(conv, msgId);
   if (msg) { msg.editing = false; renderMessages(); }
 }
 
@@ -494,30 +591,30 @@ async function regenerate(msgId) {
   if (state.loading) return;
   const conv = currentConv();
   if (!conv) return;
-  const idx = conv.messages.findIndex(m => m.id === msgId);
-  if (idx < 0 || idx === 0) return;
+  const msg = getMsg(conv, msgId);
+  if (!msg || msg.role !== 'assistant') return;
 
-  // Find user message before this assistant
-  let userIdx = idx - 1;
-  while (userIdx >= 0 && conv.messages[userIdx].role !== 'user') userIdx--;
-  if (userIdx < 0) return;
+  // Get parent user message
+  const parentId = msg.parentId;
+  const parent = getMsg(conv, parentId);
 
-  const oldMsg = conv.messages[idx];
-  const context = conv.messages.slice(0, idx);
-
-  // Save old version
-  if (oldMsg.content) {
-    oldMsg.versions.push({ content: oldMsg.content, timestamp: Date.now(), reason: 'regenerated' });
-    oldMsg.activeVersion = 0;
+  // Save old version then remove from active path
+  if (msg.content) {
+    msg.versions.push({ content: msg.content, timestamp: Date.now(), reason: 'regenerated' });
+    msg.activeVersion = 0;
   }
-  oldMsg.content = '';
 
-  // Remove the old assistant message from the display context
-  conv.messages = context;
+  // Pop this msg from active path
+  const idx = conv.activePath.indexOf(msgId);
+  if (idx >= 0) {
+    conv.activePath = conv.activePath.slice(0, idx);
+  }
 
+  msg.content = '';
   save();
   renderMessages();
 
+  const context = buildContext(conv);
   await sendFromMessage(context);
 }
 
@@ -532,18 +629,31 @@ async function sendMessage() {
   const files = state.pendingFiles || [];
   state.pendingFiles = [];
 
+  // Get parent (last active message)
+  const parent = getLastActiveMsg(conv);
+
   // Build user message
   const userMsg = {
     id: uid(),
     role: 'user',
     content: text,
+    parentId: parent ? parent.id : conv.rootId,
+    children: [],
+    title: text.substring(0, 30) + (text.length > 30 ? '...' : ''),
+    wordCount: countWords(text),
     versions: [{ content: text, timestamp: Date.now(), reason: 'original' }],
     activeVersion: 0,
     files: files.map(f => ({ name: f.name, type: f.type, content: f.content.slice(0, 5000), size: f.size })),
     createdAt: Date.now()
   };
 
-  conv.messages.push(userMsg);
+  // Add to tree
+  conv.messageMap[userMsg.id] = userMsg;
+  if (parent) {
+    parent.children.push(userMsg.id);
+  }
+  conv.activePath.push(userMsg.id);
+
   chatInput.innerText = '';
   updateSendButton();
   clearFilePreview();
@@ -570,8 +680,10 @@ function buildContext(conv) {
     msgs.push({ role: 'system', content: sysParts.join('\n\n') });
   }
 
-  // Message history
-  for (const m of conv.messages) {
+  // Message history from active path
+  const chain = getActiveChain(conv);
+  for (const m of chain) {
+    if (!m || m.role === 'system') continue;
     let content = m.content;
 
     // Include file content for user messages
@@ -598,18 +710,25 @@ async function sendFromMessage(context) {
   updateSendButton();
   setStatus('busy');
 
-  // Add placeholder assistant message
+  // Add placeholder assistant message (tree node)
+  const lastUser = getLastActiveMsg(conv);
   const assistantMsg = {
     id: uid(),
     role: 'assistant',
     content: '',
     reasoningContent: '',
+    parentId: lastUser ? lastUser.id : conv.rootId,
+    children: [],
+    title: '回复',
+    wordCount: 0,
     versions: [{ content: '', timestamp: Date.now(), reason: 'original' }],
     activeVersion: 0,
     files: [],
     createdAt: Date.now()
   };
-  conv.messages.push(assistantMsg);
+  conv.messageMap[assistantMsg.id] = assistantMsg;
+  if (lastUser) lastUser.children.push(assistantMsg.id);
+  conv.activePath.push(assistantMsg.id);
   save();
   renderMessages();
 
@@ -744,6 +863,95 @@ function updateMessageContent(msgId, content, reasoning) {
   scrollToBottom();
 }
 
+// ===== Branch tree panel =====
+function renderBranchInfo() {
+  const conv = currentConv();
+  if (!conv) return;
+  const panel = document.getElementById('branch-panel');
+  if (!panel) return;
+  panel.innerHTML = '';
+
+  // Branch word count
+  const totalWords = computeBranchWords(conv, conv.rootId);
+  const info = document.createElement('div');
+  info.className = 'branch-info';
+  info.textContent = `当前分支 ${getActiveChain(conv).filter(m => m && m.role !== 'system').length} 条消息 · ${totalWords} 字`;
+  panel.appendChild(info);
+
+  // Build tree
+  const tree = buildTreeHTML(conv, conv.rootId, conv.activePath, 0);
+  if (tree) panel.appendChild(tree);
+}
+
+function buildTreeHTML(conv, nodeId, activePath, depth) {
+  const msg = conv.messageMap[nodeId];
+  if (!msg || msg.role === 'system') return null;
+
+  const isActive = activePath.includes(nodeId);
+  const isLeaf = !msg.children || msg.children.length === 0;
+  const hasBranch = msg.children && msg.children.length > 1;
+
+  const div = document.createElement('div');
+  div.className = `branch-node${isActive ? ' active' : ''}`;
+  div.style.paddingLeft = Math.min(depth * 16, 80) + 'px';
+
+  const icon = msg.role === 'user' ? '👤' : '🤖';
+  const title = msg.title || (msg.content ? msg.content.substring(0, 20) + (msg.content.length > 20 ? '...' : '') : '(空)');
+  const wc = msg.wordCount || countWords(msg.content || '');
+
+  div.innerHTML = `<span class="branch-icon">${icon}</span>
+    <span class="branch-title">${escapeHtml(title)}</span>
+    <span class="branch-wc">${wc}</span>`;
+
+  div.addEventListener('click', () => {
+    // Switch active path to this node
+    const newPath = getBranchPath(conv, nodeId);
+    conv.activePath = newPath;
+    save();
+    renderMessages();
+    renderBranchInfo();
+  });
+
+  // Rename on double-click
+  div.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+    const titleSpan = div.querySelector('.branch-title');
+    const oldTitle = msg.title || '';
+    const input = document.createElement('input');
+    input.className = 'branch-rename-input';
+    input.value = oldTitle;
+    input.addEventListener('blur', () => {
+      msg.title = input.value.trim() || oldTitle;
+      save();
+      renderBranchInfo();
+      renderMessages();
+    });
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') input.blur();
+      if (ev.key === 'Escape') { input.value = oldTitle; input.blur(); }
+    });
+    titleSpan.innerHTML = '';
+    titleSpan.appendChild(input);
+    input.focus();
+    input.select();
+  });
+
+  // Recurse children
+  if (msg.children && msg.children.length > 0) {
+    for (const childId of msg.children) {
+      const childEl = buildTreeHTML(conv, childId, activePath, depth + 1);
+      if (childEl) div.appendChild(childEl);
+    }
+  }
+
+  // Branch indicator
+  if (hasBranch) {
+    div.classList.add('has-branch');
+  }
+
+  return div;
+}
+
 // ===== File Upload =====
 state.pendingFiles = [];
 
@@ -843,17 +1051,17 @@ function saveSettingsHandler() {
   toggleSettings(false);
 }
 
-// ===== Version Navigation (future-ready) =====
+// ===== Version Navigation =====
 window.prevVersion = function(msgId) {
   const conv = currentConv();
   if (!conv) return;
-  const msg = conv.messages.find(m => m.id === msgId);
+  const msg = getMsg(conv, msgId);
   if (msg && msg.activeVersion > 0) {
-    // Swap current content with current version
     const curContent = msg.content;
     msg.content = msg.versions[msg.activeVersion - 1].content;
     msg.versions[msg.activeVersion - 1].content = curContent;
     msg.activeVersion--;
+    msg.wordCount = countWords(msg.content);
     save();
     renderMessages();
   }
@@ -862,12 +1070,13 @@ window.prevVersion = function(msgId) {
 window.nextVersion = function(msgId) {
   const conv = currentConv();
   if (!conv) return;
-  const msg = conv.messages.find(m => m.id === msgId);
+  const msg = getMsg(conv, msgId);
   if (msg && msg.activeVersion < msg.versions.length - 1) {
     const curContent = msg.content;
     msg.content = msg.versions[msg.activeVersion + 1].content;
     msg.versions[msg.activeVersion + 1].content = curContent;
     msg.activeVersion++;
+    msg.wordCount = countWords(msg.content);
     save();
     renderMessages();
   }
