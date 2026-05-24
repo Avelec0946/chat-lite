@@ -253,8 +253,9 @@ async function init() {
   $('btn-close-settings').addEventListener('click', () => toggleSettings(false));
   $('btn-branch').addEventListener('click', openBranchDrawer);
   $('btn-close-branch').addEventListener('click', closeBranchDrawer);
-  $('btn-zoom-in').addEventListener('click', () => { branchZoom = Math.min(branchZoom * 1.3, 3); applyBranchZoom(); });
-  $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom / 1.3, 0.3); applyBranchZoom(); });
+  $('btn-zoom-in').addEventListener('click', () => { branchZoom = Math.min(branchZoom + 0.08, 1.8); applyBranchZoom(); });
+  $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.3); applyBranchZoom(); });
+  $('zoom-label').textContent = `${Math.round(branchZoom * 100)}%`;
   $('btn-export').addEventListener('click', exportConversation);
   $('btn-import').addEventListener('click', () => { document.getElementById('import-file-input').click(); });
   document.getElementById('import-file-input').addEventListener('change', importConversation);
