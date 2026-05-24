@@ -1751,17 +1751,4 @@ function buildTreeDebug(conv) {
 }
 
 // ===== Start =====
-function waitForLibs(cb) {
-  let tries = 0;
-  const check = () => {
-    if (typeof marked !== 'undefined' && typeof hljs !== 'undefined') return cb();
-    if (++tries > 100) return cb(); // timeout after 10s, proceed anyway
-    setTimeout(check, 100);
-  };
-  check();
-}
-document.addEventListener('DOMContentLoaded', () => {
-  // Show UI shell immediately
-  document.getElementById('app-root').style.visibility = 'visible';
-  waitForLibs(init);
-});
+document.addEventListener('DOMContentLoaded', init);

@@ -1,6 +1,5 @@
 /* ===== Reset & Base ===== */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-#app-root{visibility:hidden}
 :root{
   --bg:#f0f2f5;--bg2:#fff;--bg3:#f7f8fa;--text:#1a1a2e;--text2:#6b7280;--border:#e5e7eb;
   --primary:#2563eb;--primary-hover:#1d4ed8;--shadow:0 1px 3px rgba(0,0,0,.08);--radius:8px;
