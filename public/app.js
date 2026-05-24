@@ -1281,17 +1281,7 @@ const NODE_COLORS = [
 ];
 
 window.svgNodeRename = function(nodeId) {
-  const conv = currentConv();
-  if (!conv) return;
-  const msg = getMsg(conv, nodeId);
-  if (!msg) return;
-  const newTitle = prompt('重命名节点', msg.title || '');
-  if (newTitle !== null && newTitle.trim()) {
-    msg.title = newTitle.trim();
-    save();
-    openBranchDrawer();
-    renderMessages();
-  }
+  window.svgNodeColor(nodeId);
 };
 
 window.svgNodeColor = function(nodeId) {
