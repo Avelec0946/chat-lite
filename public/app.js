@@ -1500,5 +1500,54 @@ function getBranchPathFromMap(map, rootId, leafId) {
   };
 }
 
+// ===== Debug: expose state for CDP inspection =====
+window.__chatState = state;
+window.__debugConv = function(id) {
+  const conv = id ? state.conversations.find(c => c.id === id) : currentConv();
+  if (!conv) return null;
+  return {
+    id: conv.id,
+    title: conv.title,
+    model: conv.model,
+    rootId: conv.rootId,
+    activePath: conv.activePath,
+    thinkingEnabled: conv.thinkingEnabled,
+    messageCount: Object.keys(conv.messageMap || {}).length,
+    tree: buildTreeDebug(conv),
+    importSource: conv._importSource || null
+  };
+};
+window.__debugList = function() {
+  return state.conversations.map(c => ({
+    id: c.id, title: c.title, msgCount: Object.keys(c.messageMap || {}).length,
+    rootId: c.rootId, pathLen: (c.activePath||[]).length
+  }));
+};
+window.__debugDump = function() {
+  const conv = currentConv();
+  if (!conv) return null;
+  return JSON.parse(JSON.stringify(conv));
+};
+
+function buildTreeDebug(conv) {
+  const visited = new Set();
+  function walk(id, depth) {
+    if (!id || visited.has(id)) return null;
+    visited.add(id);
+    const msg = conv.messageMap?.[id];
+    if (!msg) return null;
+    return {
+      id: id.slice(0,8),
+      role: msg.role,
+      title: msg.title,
+      wordCount: msg.wordCount || 0,
+      content: (msg.content||'').substring(0, 60),
+      children: (msg.children||[]).map(cid => walk(cid, depth+1)).filter(Boolean),
+      inPath: (conv.activePath||[]).includes(id)
+    };
+  }
+  return walk(conv.rootId, 0);
+}
+
 // ===== Start =====
 document.addEventListener('DOMContentLoaded', init);
