@@ -1051,7 +1051,7 @@ function renderTreeSVG(conv) {
     const icon = msg.role === 'user' ? '👤' : '🤖';
     const raw = (msg.title || msg.content || '').replace(/\\s+/g, ' ').trim() || '(空)';
     // Truncate by visual width: CJK ≈ 2 units, ASCII ≈ 1 unit
-    let title = '', w = 0, maxW = 22;
+    let title = '', w = 0, maxW = 16;
     for (const ch of raw) { 
       const cw = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? 2 : 1;
       if (w + cw > maxW) { title += '…'; break; }
