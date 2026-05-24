@@ -313,7 +313,7 @@ function renderSidebar() {
   convList.innerHTML = state.conversations.map(c =>
     `<div class="conv-item${c.id === state.currentId ? ' active' : ''}" data-id="${c.id}">
       <span class="conv-title">${escapeHtml(c.title)}</span>
-      <button class="del-btn" data-id="${c.id}" title="删除对话">✕</button>
+      <button class="del-btn" data-id="${c.id}" title="删除">🗑</button>
     </div>`
   ).join('');
 
@@ -321,7 +321,36 @@ function renderSidebar() {
   convList.querySelectorAll('.conv-item').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.classList.contains('del-btn')) return;
+      if (e.target.tagName === 'INPUT') return;
       switchConversation(el.dataset.id);
+    });
+  });
+
+  // Double-click to rename
+  convList.querySelectorAll('.conv-item').forEach(el => {
+    el.addEventListener('dblclick', (e) => {
+      if (e.target.classList.contains('del-btn')) return;
+      const id = el.dataset.id;
+      const conv = state.conversations.find(c => c.id === id);
+      if (!conv) return;
+      const titleSpan = el.querySelector('.conv-title');
+      const oldTitle = conv.title;
+      const input = document.createElement('input');
+      input.className = 'conv-rename-input';
+      input.value = oldTitle;
+      input.addEventListener('blur', () => {
+        conv.title = input.value.trim() || oldTitle;
+        save();
+        renderSidebar();
+      });
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') input.blur();
+        if (ev.key === 'Escape') { input.value = oldTitle; input.blur(); }
+      });
+      titleSpan.innerHTML = '';
+      titleSpan.appendChild(input);
+      input.focus();
+      input.select();
     });
   });
 
