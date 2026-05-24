@@ -253,9 +253,8 @@ async function init() {
   $('btn-close-settings').addEventListener('click', () => toggleSettings(false));
   $('btn-branch').addEventListener('click', openBranchDrawer);
   $('btn-close-branch').addEventListener('click', closeBranchDrawer);
-  $('btn-zoom-in').addEventListener('click', () => { branchZoom = Math.min(branchZoom + 0.08, 1.8); applyBranchZoom(); });
-  $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.3); applyBranchZoom(); });
-  $('zoom-label').textContent = `${Math.round(branchZoom * 100)}%`;
+  $('btn-zoom-in').addEventListener('click', () => { branchZoom = Math.min(branchZoom + 0.08, 1.8); applyBranchZoom(); updateZoomLabel(); });
+  $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.3); applyBranchZoom(); updateZoomLabel(); });
   $('btn-export').addEventListener('click', exportConversation);
   $('btn-import').addEventListener('click', () => { document.getElementById('import-file-input').click(); });
   document.getElementById('import-file-input').addEventListener('change', importConversation);
@@ -264,6 +263,10 @@ async function init() {
 const applyBranchZoom = function() {
   const svg = document.querySelector('.branch-svg');
   if (svg) { svg.style.transform = `scale(${branchZoom})`; svg.style.transformOrigin = 'top left'; }
+};
+const updateZoomLabel = function() {
+  const lbl = document.getElementById('zoom-label');
+  if (lbl) lbl.textContent = Math.round(branchZoom * 100) + '%';
 };
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
   settingsPanel.querySelector('.settings-backdrop').addEventListener('click', () => toggleSettings(false));
