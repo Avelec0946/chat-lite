@@ -1207,7 +1207,7 @@ function renderTreeSVG(conv) {
     
     const bx = pos.x - NODE_W/2;
     const by = pos.y - NODE_H/2;
-    const fillColor = node.color || (isActive ? 'var(--primary)' : 'var(--bg2)');
+    const fillColor = msg.color || (isActive ? 'var(--primary)' : 'var(--bg2)');
     
     svg += `<g class="tree-node" onclick="svgNodeClick('${nodeId}')" oncontextmenu="event.preventDefault();svgNodeRename('${nodeId}')" transform="translate(${bx},${by})">
       <rect x="0" y="0" width="${NODE_W}" height="${NODE_H}" rx="8" 
