@@ -251,6 +251,9 @@ async function init() {
   btnNew.addEventListener('click', newChat);
   $('btn-settings').addEventListener('click', () => toggleSettings(true));
   $('btn-close-settings').addEventListener('click', () => toggleSettings(false));
+  $('btn-branch').addEventListener('click', openBranchDrawer);
+  $('btn-close-branch').addEventListener('click', closeBranchDrawer);
+  document.querySelector('#branch-drawer .branch-drawer-backdrop').addEventListener('click', closeBranchDrawer);
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
   settingsPanel.querySelector('.settings-backdrop').addEventListener('click', () => toggleSettings(false));
   sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
@@ -359,6 +362,35 @@ function newChat() {
   chatInput.focus();
 }
 
+// ===== Breadcrumb =====
+function renderBreadcrumb(conv) {
+  const bar = document.getElementById('breadcrumb-bar');
+  if (!bar) return;
+  const chain = getActiveChain(conv);
+  const display = chain.filter(m => m && m.role !== 'system');
+  if (display.length < 2) { bar.innerHTML = ''; bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  let html = '';
+  display.forEach((m, i) => {
+    const label = m.title || m.content.substring(0, 20) + (m.content.length > 20 ? '...' : '') || '(空)';
+    const icon = m.role === 'user' ? '👤' : '🤖';
+    const isLast = i === display.length - 1;
+    html += `<span class="breadcrumb-segment${isLast ? ' active' : ''}" data-id="${m.id}">${icon} ${escapeHtml(label)}</span>`;
+    if (!isLast) html += '<span class="breadcrumb-sep">▸</span>';
+  });
+  bar.innerHTML = html;
+  bar.querySelectorAll('.breadcrumb-segment').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.id;
+      const newPath = getBranchPath(conv, id);
+      conv.activePath = newPath;
+      save();
+      renderMessages();
+      renderBreadcrumb(conv);
+    });
+  });
+}
+
 // ===== Messages Rendering =====
 function renderMessages() {
   const conv = currentConv();
@@ -427,7 +459,7 @@ function renderMessages() {
     }
   });
 
-  renderBranchInfo();
+  renderBreadcrumb(conv);
   scrollToBottom();
 }
 
@@ -455,19 +487,21 @@ function renderContent(msg) {
   const rendered = marked.parse(msg.content || '', { breaks: true, gfm: true });
   html += rendered;
 
+  // Version arrows (if multiple versions exist)
+  if (msg.versions && msg.versions.length > 1) {
+    const isFirst = msg.activeVersion <= 0;
+    const isLast = msg.activeVersion >= msg.versions.length - 1;
+    html += `<span class="version-arrows">
+      <button class="version-arrow" onclick="prevVersion('${msg.id}')" ${isFirst ? 'disabled' : ''}>◀</button>
+      <span class="version-label">${msg.activeVersion + 1}/${msg.versions.length}</span>
+      <button class="version-arrow" onclick="nextVersion('${msg.id}')" ${isLast ? 'disabled' : ''}>▶</button>
+    </span>`;
+  }
+
   // Word count
   const wc = countWords(msg.content || '');
   if (wc > 0) {
     html += `<span class="msg-wordcount">${wc}字</span>`;
-  }
-
-  // Version info (if multiple versions exist)
-  if (msg.versions && msg.versions.length > 1) {
-    html += `<div style="font-size:12px;color:var(--text2);margin-top:4px">
-      版本 ${msg.activeVersion + 1}/${msg.versions.length}
-      ${msg.activeVersion > 0 ? '<button class="msg-action-btn" onclick="prevVersion(\'' + msg.id + '\')">⬅</button>' : ''}
-      ${msg.activeVersion < msg.versions.length - 1 ? '<button class="msg-action-btn" onclick="nextVersion(\'' + msg.id + '\')">➡</button>' : ''}
-    </div>`;
   }
 
   return html;
@@ -863,24 +897,26 @@ function updateMessageContent(msgId, content, reasoning) {
   scrollToBottom();
 }
 
-// ===== Branch tree panel =====
-function renderBranchInfo() {
+// ===== Branch drawer =====
+function openBranchDrawer() {
   const conv = currentConv();
   if (!conv) return;
-  const panel = document.getElementById('branch-panel');
-  if (!panel) return;
-  panel.innerHTML = '';
+  const drawer = document.getElementById('branch-drawer');
+  const tree = document.getElementById('branch-tree');
+  const info = document.getElementById('branch-info');
+  drawer.style.display = 'flex';
 
-  // Branch word count
   const totalWords = computeBranchWords(conv, conv.rootId);
-  const info = document.createElement('div');
-  info.className = 'branch-info';
-  info.textContent = `当前分支 ${getActiveChain(conv).filter(m => m && m.role !== 'system').length} 条消息 · ${totalWords} 字`;
-  panel.appendChild(info);
+  const chainLen = getActiveChain(conv).filter(m => m && m.role !== 'system').length;
+  info.textContent = `当前分支 ${chainLen} 条消息 · ${totalWords} 字`;
 
-  // Build tree
-  const tree = buildTreeHTML(conv, conv.rootId, conv.activePath, 0);
-  if (tree) panel.appendChild(tree);
+  tree.innerHTML = '';
+  const treeEl = buildTreeHTML(conv, conv.rootId, conv.activePath, 0);
+  if (treeEl) tree.appendChild(treeEl);
+}
+
+function closeBranchDrawer() {
+  document.getElementById('branch-drawer').style.display = 'none';
 }
 
 function buildTreeHTML(conv, nodeId, activePath, depth) {
