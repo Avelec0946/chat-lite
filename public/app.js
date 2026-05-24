@@ -1293,18 +1293,31 @@ function importConversation(e) {
   reader.onload = (ev) => {
     try {
       const data = JSON.parse(ev.target.result);
-      let conv = data.conversation || data;
-      // Basic validation
-      if (!conv.id || !conv.messageMap || !conv.activePath) {
-        // Try migrating from v1 format
-        if (conv.messages && Array.isArray(conv.messages)) {
-          migrateV1toV2(conv);
-        } else {
-          alert('无效的对话文件');
-          return;
-        }
+      let conv;
+      
+      // Format 1: chat-lite export
+      if (data.version && data.conversation) {
+        conv = data.conversation;
+        if (!conv.id || !conv.messageMap) throw new Error('chat-lite format corrupted');
       }
-      // Ensure unique ID
+      // Format 2: DZMM export
+      else if (data.chatId && data.chat && data.messages) {
+        conv = convertDZMM(data);
+      }
+      // Format 3: plain chat-lite conversation (no wrapper)
+      else if (data.id && data.messageMap) {
+        conv = data;
+      }
+      // Format 4: old v1 linear array
+      else if (data.messages && Array.isArray(data.messages)) {
+        conv = { messages: data.messages };
+        migrateV1toV2(conv);
+      }
+      else {
+        alert('不支持的格式，请导入 chat-lite 导出的 JSON 或 DZMM 导出的 JSON');
+        return;
+      }
+      
       conv.id = uid();
       state.conversations.push(conv);
       state.currentId = conv.id;
@@ -1318,6 +1331,110 @@ function importConversation(e) {
   };
   reader.readAsText(file);
   e.target.value = '';
+}
+
+// Convert DZMM (dzmm.ai) export format to chat-lite tree
+function convertDZMM(data) {
+  const chat = data.chat || {};
+  const chunks = chat.chunks || [];
+  const messages = data.messages || [];
+  
+  // Build message lookup by chunk_id
+  const chunkMsgs = {};
+  for (const entry of messages) {
+    chunkMsgs[entry.chunk_id] = entry.messages || [];
+  }
+  
+  // Build chunk map
+  const chunkMap = {};
+  for (const c of chunks) {
+    chunkMap[c.id] = c;
+  }
+  
+  // Find root chunk(s) - those without parent
+  const roots = chunks.filter(c => !c.parent);
+  const rootId = uid();
+  const rootMsg = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
+  const messageMap = { [rootId]: rootMsg };
+  
+  // Walk the DZMM tree and build chat-lite nodes
+  function walk(chunkId, parentId, depth) {
+    const chunk = chunkMap[chunkId];
+    if (!chunk) return;
+    const msgs = chunkMsgs[chunkId] || [];
+    if (msgs.length === 0) return;
+    
+    // Concatenate messages in this chunk into a single user/assistant pair
+    // DZMM format: a chunk corresponds to a message exchange (user + assistant)
+    let userContent = '', assistantContent = '';
+    for (const m of msgs) {
+      if (m.role === 'user') userContent += (userContent ? '\n\n' : '') + (m.content || '');
+      else if (m.role === 'assistant') assistantContent += (assistantContent ? '\n\n' : '') + (m.content || '');
+    }
+    
+    let lastId = parentId;
+    if (userContent) {
+      const userMsg = {
+        id: uid(), role: 'user', content: userContent,
+        parentId: lastId, children: [],
+        title: (userContent || '').substring(0, 30) + (userContent.length > 30 ? '...' : ''),
+        wordCount: countWords(userContent),
+        versions: [{ content: userContent, timestamp: Date.now(), reason: 'import' }],
+        activeVersion: 0, files: [], createdAt: Date.now()
+      };
+      messageMap[userMsg.id] = userMsg;
+      messageMap[lastId].children.push(userMsg.id);
+      lastId = userMsg.id;
+    }
+    if (assistantContent) {
+      const asstMsg = {
+        id: uid(), role: 'assistant', content: assistantContent,
+        parentId: lastId, children: [],
+        title: '回复',
+        wordCount: countWords(assistantContent),
+        versions: [{ content: assistantContent, timestamp: Date.now(), reason: 'import' }],
+        activeVersion: 0, files: [], createdAt: Date.now()
+      };
+      messageMap[asstMsg.id] = asstMsg;
+      messageMap[lastId].children.push(asstMsg.id);
+      lastId = asstMsg.id;
+    }
+    
+    // Process children
+    for (const childId of (chunk.children || [])) {
+      walk(childId, lastId, depth + 1);
+    }
+  }
+  
+  // Start walking from roots, attach to chat-lite root
+  for (const r of roots) {
+    walk(r.id, rootId, 0);
+  }
+  
+  // Build active path
+  const activePath = [rootId];
+  let currentId = rootId;
+  while (true) {
+    const node = messageMap[currentId];
+    if (!node || !node.children || node.children.length === 0) break;
+    // Find first child that's on an active chunk path
+    const nextId = node.children[0];
+    activePath.push(nextId);
+    currentId = nextId;
+  }
+  
+  return {
+    id: uid(),
+    title: chat.title || '导入的对话',
+    model: 'deepseek-v4-flash',
+    thinkingEnabled: true,
+    systemPrompt: '',
+    userIdentity: '',
+    rootId,
+    activePath,
+    messageMap,
+    createdAt: Date.now()
+  };
 }
 
 // ===== Start =====
