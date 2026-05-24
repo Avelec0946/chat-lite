@@ -1049,11 +1049,15 @@ function onPinchMove(e) {
   const scale = newDist / pinchState.dist;
   const newZoom = Math.max(0.3, Math.min(pinchState.startZoom * scale, 50));
   
-  // Record the SVG coordinate under the pinch midpoint BEFORE zoom
+  // Use the CURRENT pinch midpoint, not the initial one
+  const curMidX = (t1.clientX + t2.clientX) / 2;
+  const curMidY = (t1.clientY + t2.clientY) / 2;
+  
+  // Record the SVG coordinate under the CURRENT pinch midpoint BEFORE zoom
   const container = pinchState.container;
   const containerRect = container.getBoundingClientRect();
-  const midScreenX = pinchState.midX - containerRect.left;
-  const midScreenY = pinchState.midY - containerRect.top;
+  const midScreenX = curMidX - containerRect.left;
+  const midScreenY = curMidY - containerRect.top;
   const svgX = (container.scrollLeft + midScreenX) / pinchState.startZoom;
   const svgY = (container.scrollTop + midScreenY) / pinchState.startZoom;
   
@@ -1064,6 +1068,7 @@ function onPinchMove(e) {
   // After zoom, reposition so the same SVG coordinate is under the same screen position
   container.scrollLeft = svgX * newZoom - midScreenX;
   container.scrollTop = svgY * newZoom - midScreenY;
+  pinchState.startZoom = newZoom;
 }
 
 function onPinchEnd() {
