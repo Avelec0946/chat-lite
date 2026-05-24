@@ -251,7 +251,7 @@ async function init() {
   btnNew.addEventListener('click', newChat);
   $('btn-settings').addEventListener('click', () => toggleSettings(true));
   $('btn-close-settings').addEventListener('click', () => toggleSettings(false));
-  $('btn-branch').addEventListener('click', openBranchDrawer);
+  $('btn-branch').addEventListener('click', () => { openBranchDrawer(); setTimeout(applyBranchCenter, 200); });
   $('btn-close-branch').addEventListener('click', closeBranchDrawer);
   $('btn-zoom-in').addEventListener('click', () => { branchZoom = branchZoom + 0.08; applyBranchZoom(); updateZoomInput(); });
   $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.3); applyBranchZoom(); updateZoomInput(); });
@@ -997,8 +997,6 @@ function openBranchDrawer() {
   tree.innerHTML = renderTreeSVG(conv);
   applyBranchZoom();
   initPinchZoom();
-  // One-time center on open
-  setTimeout(applyBranchCenter, 200);
 }
 
 let branchZoom = 1;
