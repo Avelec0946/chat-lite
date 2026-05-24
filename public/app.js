@@ -996,6 +996,8 @@ function openBranchDrawer() {
 
   tree.innerHTML = renderTreeSVG(conv);
   applyBranchZoom();
+  // One-time center on open
+  setTimeout(applyBranchCenter, 200);
 }
 
 let branchZoom = 1;
@@ -1138,7 +1140,6 @@ function applyBranchZoom() {
   }
   svg.setAttribute('width', Math.round(origW * branchZoom));
   svg.setAttribute('height', Math.round(origH * branchZoom));
-  applyBranchCenter();
 }
 function applyBranchCenter() {
   const container = document.querySelector('.branch-drawer-body');
