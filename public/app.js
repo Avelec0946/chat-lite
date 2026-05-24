@@ -253,7 +253,14 @@ async function init() {
   $('btn-close-settings').addEventListener('click', () => toggleSettings(false));
   $('btn-branch').addEventListener('click', openBranchDrawer);
   $('btn-close-branch').addEventListener('click', closeBranchDrawer);
+  $('btn-zoom-in').addEventListener('click', () => { branchZoom = Math.min(branchZoom * 1.3, 3); applyBranchZoom(); });
+  $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom / 1.3, 0.3); applyBranchZoom(); });
   document.querySelector('#branch-drawer .branch-drawer-backdrop').addEventListener('click', closeBranchDrawer);
+
+function applyBranchZoom() {
+  const svg = document.querySelector('.branch-svg');
+  if (svg) { svg.style.transform = `scale(${branchZoom})`; svg.style.transformOrigin = 'top left'; }
+}
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
   settingsPanel.querySelector('.settings-backdrop').addEventListener('click', () => toggleSettings(false));
   sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
@@ -956,8 +963,11 @@ function openBranchDrawer() {
   tree.innerHTML = renderTreeSVG(conv);
 }
 
+let branchZoom = 1;
+
 function closeBranchDrawer() {
   document.getElementById('branch-drawer').style.display = 'none';
+  branchZoom = 1;
 }
 
 // ===== SVG Tree Layout & Rendering =====

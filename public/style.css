@@ -40,6 +40,9 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .branch-svg{display:block}
 .branch-svg .tree-node{cursor:pointer;transition:opacity .15s}
 .branch-svg .tree-node:hover rect{stroke:var(--primary);stroke-width:2}
+.branch-zoom-controls{display:flex;gap:4px;margin-left:auto;margin-right:8px}
+.branch-zoom-controls .btn-icon{width:28px;height:28px;font-size:16px;border-radius:6px}
+.branch-svg{transition:transform .2s}
 .branch-info{padding:8px 0 12px;color:var(--text2);font-size:12px;border-bottom:1px solid var(--border);margin-bottom:8px}
 /* Version arrows */
 .version-arrows{display:inline-flex;align-items:center;gap:2px;margin-left:8px;vertical-align:middle}
