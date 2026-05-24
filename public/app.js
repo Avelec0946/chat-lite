@@ -1049,7 +1049,14 @@ function renderTreeSVG(conv) {
     const isActive = conv.activePath.includes(nodeId);
     const hasChildren = (msg.children || []).length > 0;
     const icon = msg.role === 'user' ? '👤' : '🤖';
-    const title = (msg.title || msg.content || '').substring(0, 14) || '(空)';
+    const raw = (msg.title || msg.content || '').replace(/\\s+/g, ' ').trim() || '(空)';
+    // Truncate by visual width: CJK ≈ 2 units, ASCII ≈ 1 unit
+    let title = '', w = 0, maxW = 22;
+    for (const ch of raw) { 
+      const cw = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? 2 : 1;
+      if (w + cw > maxW) { title += '…'; break; }
+      title += ch; w += cw;
+    }
     const wc = msg.wordCount || countWords(msg.content || '');
     
     const bx = pos.x - NODE_W/2;
