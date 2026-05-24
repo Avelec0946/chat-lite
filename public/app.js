@@ -426,6 +426,7 @@ function renderMessages() {
       <div class="msg-bubble">
         ${msg.title && msg.title !== '对话根节点' ? `<div class="msg-title">${escapeHtml(msg.title)}</div>` : ''}
         ${content}
+        ${renderSiblingArrows(msg, conv)}
         ${msg.role === 'assistant' && !msg.editing ? `
         <div class="msg-actions">
           <button class="msg-action-btn edit-btn" title="编辑">编辑</button>
@@ -466,6 +467,56 @@ function renderMessages() {
   scrollToBottom();
 }
 
+// Sibling navigation (branch switching)
+function renderSiblingArrows(msg, conv) {
+  const parent = getMsg(conv, msg.parentId);
+  if (!parent || !parent.children || parent.children.length <= 1) return '';
+  const siblings = parent.children;
+  const idx = siblings.indexOf(msg.id);
+  if (idx < 0) return '';
+  return `<span class="version-arrows branch-nav">
+    <button class="version-arrow" onclick="switchSibling('${msg.id}', -1)" ${idx === 0 ? 'disabled' : ''}>◀</button>
+    <span class="version-label">${idx + 1}/${siblings.length}</span>
+    <button class="version-arrow" onclick="switchSibling('${msg.id}', 1)" ${idx >= siblings.length - 1 ? 'disabled' : ''}>▶</button>
+  </span>`;
+}
+
+window.switchSibling = function(currentId, direction) {
+  const conv = currentConv();
+  if (!conv) return;
+  const msg = getMsg(conv, currentId);
+  if (!msg) return;
+  const parent = getMsg(conv, msg.parentId);
+  if (!parent || !parent.children) return;
+  const siblings = parent.children;
+  const idx = siblings.indexOf(currentId);
+  if (idx < 0) return;
+  const newIdx = idx + direction;
+  if (newIdx < 0 || newIdx >= siblings.length) return;
+  
+  const newId = siblings[newIdx];
+  const pathIdx = conv.activePath.indexOf(currentId);
+  if (pathIdx >= 0) {
+    conv.activePath[pathIdx] = newId;
+    // Truncate any subsequent messages in activePath (they belong to old branch)
+    conv.activePath = conv.activePath.slice(0, pathIdx + 1);
+    // Append the new branch's children path
+    appendChildPath(conv, newId);
+  }
+  save();
+  renderMessages();
+  renderBreadcrumb(conv);
+};
+
+function appendChildPath(conv, fromId) {
+  const msg = conv.messageMap[fromId];
+  if (!msg || !msg.children || msg.children.length === 0) return;
+  // Follow the first child (preferred path)
+  const nextId = msg.children[0];
+  conv.activePath.push(nextId);
+  appendChildPath(conv, nextId);
+}
+
 function renderContent(msg) {
   let html = '';
 
@@ -489,17 +540,6 @@ function renderContent(msg) {
   // Markdown content
   const rendered = marked.parse(msg.content || '', { breaks: true, gfm: true });
   html += rendered;
-
-  // Version arrows (if multiple versions exist)
-  if (msg.versions && msg.versions.length > 1) {
-    const isFirst = msg.activeVersion <= 0;
-    const isLast = msg.activeVersion >= msg.versions.length - 1;
-    html += `<span class="version-arrows">
-      <button class="version-arrow" onclick="prevVersion('${msg.id}')" ${isFirst ? 'disabled' : ''}>◀</button>
-      <span class="version-label">${msg.activeVersion + 1}/${msg.versions.length}</span>
-      <button class="version-arrow" onclick="nextVersion('${msg.id}')" ${isLast ? 'disabled' : ''}>▶</button>
-    </span>`;
-  }
 
   // Word count
   const wc = countWords(msg.content || '');
@@ -948,13 +988,14 @@ function buildTreeHTML(conv, nodeId, activePath, depth) {
       <span class="branch-title">${escapeHtml(title)}</span>
       <span class="branch-wc">${wc}</span>`;
 
-    div.addEventListener('click', () => {
+    div.addEventListener('click', (e) => {
+      e.stopPropagation();
       const newPath = getBranchPath(conv, nodeId);
       conv.activePath = newPath;
       save();
       renderMessages();
       renderBreadcrumb(conv);
-      openBranchDrawer();
+      closeBranchDrawer();
     });
 
     div.addEventListener('dblclick', (e) => {
