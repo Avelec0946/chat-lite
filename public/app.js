@@ -1362,45 +1362,47 @@ function convertDZMM(data) {
     const chunk = chunkMap[chunkId];
     if (!chunk) return;
     const msgs = chunkMsgs[chunkId] || [];
-    if (msgs.length === 0) return;
     
-    // Concatenate messages in this chunk into a single user/assistant pair
-    // DZMM format: a chunk corresponds to a message exchange (user + assistant)
-    let userContent = '', assistantContent = '';
-    for (const m of msgs) {
-      if (m.role === 'user') userContent += (userContent ? '\n\n' : '') + (m.content || '');
-      else if (m.role === 'assistant') assistantContent += (assistantContent ? '\n\n' : '') + (m.content || '');
-    }
-    
+    // Even if no messages for this chunk, still process children
     let lastId = parentId;
-    if (userContent) {
-      const userMsg = {
-        id: uid(), role: 'user', content: userContent,
-        parentId: lastId, children: [],
-        title: (userContent || '').substring(0, 30) + (userContent.length > 30 ? '...' : ''),
-        wordCount: countWords(userContent),
-        versions: [{ content: userContent, timestamp: Date.now(), reason: 'import' }],
-        activeVersion: 0, files: [], createdAt: Date.now()
-      };
-      messageMap[userMsg.id] = userMsg;
-      messageMap[lastId].children.push(userMsg.id);
-      lastId = userMsg.id;
-    }
-    if (assistantContent) {
-      const asstMsg = {
-        id: uid(), role: 'assistant', content: assistantContent,
-        parentId: lastId, children: [],
-        title: '回复',
-        wordCount: countWords(assistantContent),
-        versions: [{ content: assistantContent, timestamp: Date.now(), reason: 'import' }],
-        activeVersion: 0, files: [], createdAt: Date.now()
-      };
-      messageMap[asstMsg.id] = asstMsg;
-      messageMap[lastId].children.push(asstMsg.id);
-      lastId = asstMsg.id;
+    
+    if (msgs.length > 0) {
+      // Concatenate messages in this chunk
+      let userContent = '', assistantContent = '';
+      for (const m of msgs) {
+        if (m.role === 'user') userContent += (userContent ? '\n\n' : '') + (m.content || '');
+        else if (m.role === 'assistant') assistantContent += (assistantContent ? '\n\n' : '') + (m.content || '');
+      }
+      
+      if (userContent) {
+        const userMsg = {
+          id: uid(), role: 'user', content: userContent,
+          parentId: lastId, children: [],
+          title: (userContent || '').substring(0, 30) + (userContent.length > 30 ? '...' : ''),
+          wordCount: countWords(userContent),
+          versions: [{ content: userContent, timestamp: Date.now(), reason: 'import' }],
+          activeVersion: 0, files: [], createdAt: Date.now()
+        };
+        messageMap[userMsg.id] = userMsg;
+        messageMap[lastId].children.push(userMsg.id);
+        lastId = userMsg.id;
+      }
+      if (assistantContent) {
+        const asstMsg = {
+          id: uid(), role: 'assistant', content: assistantContent,
+          parentId: lastId, children: [],
+          title: '回复',
+          wordCount: countWords(assistantContent),
+          versions: [{ content: assistantContent, timestamp: Date.now(), reason: 'import' }],
+          activeVersion: 0, files: [], createdAt: Date.now()
+        };
+        messageMap[asstMsg.id] = asstMsg;
+        messageMap[lastId].children.push(asstMsg.id);
+        lastId = asstMsg.id;
+      }
     }
     
-    // Process children
+    // Process children (always, even if this chunk had no messages)
     for (const childId of (chunk.children || [])) {
       walk(childId, lastId, depth + 1);
     }
@@ -1411,13 +1413,30 @@ function convertDZMM(data) {
     walk(r.id, rootId, 0);
   }
   
-  // Build active path
+  // Build active path by following active:true chunks
   const activePath = [rootId];
   let currentId = rootId;
+  let currentChunkId = null;
+  // Find all active chunks (the main branch in DZMM)
+  const activeChunkIds = new Set(chunks.filter(c => c.active).map(c => c.id));
+  // Also follow the leaf path: start from root chunk, follow children that are active or have active descendants
+  for (const r of roots) {
+    let cid = r.id;
+    while (cid) {
+      const chunk = chunkMap[cid];
+      if (!chunk) break;
+      // Find first active child (or any child if none active)
+      const children = chunk.children || [];
+      const activeChild = children.find(c => chunkMap[c] && chunkMap[c].active);
+      cid = activeChild || children.find(c => chunkMap[c]) || null;
+    }
+  }
+  // Simpler approach: walk the tree and follow the first child at each level
+  // (matches what chat-lite does natively)
+  currentId = rootId;
   while (true) {
     const node = messageMap[currentId];
     if (!node || !node.children || node.children.length === 0) break;
-    // Find first child that's on an active chunk path
     const nextId = node.children[0];
     activePath.push(nextId);
     currentId = nextId;
