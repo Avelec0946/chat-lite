@@ -260,10 +260,10 @@ async function init() {
   document.getElementById('import-file-input').addEventListener('change', importConversation);
   document.querySelector('#branch-drawer .branch-drawer-backdrop').addEventListener('click', closeBranchDrawer);
 
-function applyBranchZoom() {
+const applyBranchZoom = function() {
   const svg = document.querySelector('.branch-svg');
   if (svg) { svg.style.transform = `scale(${branchZoom})`; svg.style.transformOrigin = 'top left'; }
-}
+};
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
   settingsPanel.querySelector('.settings-backdrop').addEventListener('click', () => toggleSettings(false));
   sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
