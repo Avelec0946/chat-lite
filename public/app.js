@@ -1046,6 +1046,8 @@ function onPinchMove(e) {
   e.preventDefault();
   const t1 = e.touches[0], t2 = e.touches[1];
   const newDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+  // Dead zone: skip if fingers barely moved (< 2px change)
+  if (Math.abs(newDist - pinchState.dist) < 2) return;
   const scale = newDist / pinchState.dist;
   const newZoom = Math.max(0.3, Math.min(pinchState.startZoom * scale, 50));
   
