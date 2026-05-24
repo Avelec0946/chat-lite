@@ -266,14 +266,6 @@ async function init() {
   document.getElementById('import-file-input').addEventListener('change', importConversation);
   document.querySelector('#branch-drawer .branch-drawer-backdrop').addEventListener('click', closeBranchDrawer);
 
-const applyBranchZoom = function() {
-  const svg = document.querySelector('.branch-svg');
-  if (svg) { svg.style.transform = `scale(${branchZoom})`; svg.style.transformOrigin = 'top left'; }
-};
-const updateZoomInput = function() {
-  const inp = document.getElementById('zoom-input');
-  if (inp) inp.value = Math.round(branchZoom * 100);
-};
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
   settingsPanel.querySelector('.settings-backdrop').addEventListener('click', () => toggleSettings(false));
   sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('hidden'));
@@ -1149,6 +1141,15 @@ window.svgNodeClick = function(nodeId) {
   renderBreadcrumb(conv);
   closeBranchDrawer();
 };
+
+function applyBranchZoom() {
+  const svg = document.querySelector('.branch-svg');
+  if (svg) { svg.style.transform = `scale(${branchZoom})`; svg.style.transformOrigin = 'top left'; }
+}
+function updateZoomInput() {
+  const inp = document.getElementById('zoom-input');
+  if (inp) inp.value = Math.round(branchZoom * 100);
+}
 
 window.svgNodeRename = function(nodeId) {
   const conv = currentConv();
