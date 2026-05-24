@@ -1231,6 +1231,17 @@ function updateZoomInput() {
   if (inp) inp.value = Math.round(branchZoom * 100);
 }
 
+const NODE_COLORS = [
+  { name: '默认', value: null },
+  { name: '红', value: '#ef4444' },
+  { name: '绿', value: '#22c55e' },
+  { name: '蓝', value: '#3b82f6' },
+  { name: '黄', value: '#eab308' },
+  { name: '紫', value: '#a855f7' },
+  { name: '橙', value: '#f97316' },
+  { name: '灰', value: '#6b7280' },
+];
+
 window.svgNodeRename = function(nodeId) {
   const conv = currentConv();
   if (!conv) return;
@@ -1242,6 +1253,24 @@ window.svgNodeRename = function(nodeId) {
     save();
     openBranchDrawer();
     renderMessages();
+  }
+};
+
+window.svgNodeColor = function(nodeId) {
+  const conv = currentConv();
+  if (!conv) return;
+  const msg = getMsg(conv, nodeId);
+  if (!msg) return;
+  const colorList = NODE_COLORS.map((c,i) => `${i}. ${c.name}`).join('\n');
+  const idx = prompt('选择节点颜色:\n' + colorList + '\n输入数字:', msg.color ? NODE_COLORS.findIndex(c => c.value === msg.color).toString() : '0');
+  if (idx !== null) {
+    const ci = parseInt(idx) || 0;
+    if (ci >= 0 && ci < NODE_COLORS.length) {
+      msg.color = NODE_COLORS[ci].value;
+      save();
+      openBranchDrawer();
+      renderMessages();
+    }
   }
 };
 
