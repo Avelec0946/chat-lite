@@ -326,14 +326,14 @@ function renderSidebar() {
     });
   });
 
-  // Double-click to rename
-  convList.querySelectorAll('.conv-item').forEach(el => {
-    el.addEventListener('dblclick', (e) => {
-      if (e.target.classList.contains('del-btn')) return;
-      const id = el.dataset.id;
+  // Rename conversation by clicking its title
+  convList.querySelectorAll('.conv-title').forEach(span => {
+    span.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const convItem = span.closest('.conv-item');
+      const id = convItem.dataset.id;
       const conv = state.conversations.find(c => c.id === id);
       if (!conv) return;
-      const titleSpan = el.querySelector('.conv-title');
       const oldTitle = conv.title;
       const input = document.createElement('input');
       input.className = 'conv-rename-input';
@@ -347,8 +347,8 @@ function renderSidebar() {
         if (ev.key === 'Enter') input.blur();
         if (ev.key === 'Escape') { input.value = oldTitle; input.blur(); }
       });
-      titleSpan.innerHTML = '';
-      titleSpan.appendChild(input);
+      span.innerHTML = '';
+      span.appendChild(input);
       input.focus();
       input.select();
     });
