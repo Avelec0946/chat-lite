@@ -1356,17 +1356,16 @@ function convertDZMM(data) {
   const rootMsg = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
   const messageMap = { [rootId]: rootMsg };
   
-  // Walk the DZMM tree and build chat-lite nodes
-  function walk(chunkId, parentId, depth) {
+  // Walk the DZMM tree: build ALL nodes (main + branches), return leaf ID if on active path
+  function walk(chunkId, parentId, isActive) {
     const chunk = chunkMap[chunkId];
-    if (!chunk) return;
+    if (!chunk) return null;
     const msgs = chunkMsgs[chunkId] || [];
     
-    // Even if no messages for this chunk, still process children
     let lastId = parentId;
+    let leafId = null;
     
     if (msgs.length > 0) {
-      // Concatenate messages in this chunk
       let userContent = '', assistantContent = '';
       for (const m of msgs) {
         if (m.role === 'user') userContent += (userContent ? '\n\n' : '') + (m.content || '');
@@ -1385,6 +1384,7 @@ function convertDZMM(data) {
         messageMap[userMsg.id] = userMsg;
         messageMap[lastId].children.push(userMsg.id);
         lastId = userMsg.id;
+        if (isActive) leafId = userMsg.id;
       }
       if (assistantContent) {
         const asstMsg = {
@@ -1398,48 +1398,63 @@ function convertDZMM(data) {
         messageMap[asstMsg.id] = asstMsg;
         messageMap[lastId].children.push(asstMsg.id);
         lastId = asstMsg.id;
+        if (isActive) leafId = asstMsg.id;
       }
     }
     
-    // Process children (always, even if this chunk had no messages)
-    for (const childId of (chunk.children || [])) {
-      walk(childId, lastId, depth + 1);
+    // Process children: active child gets isActive=true, others get isActive=false
+    const children = chunk.children || [];
+    const activeChildId = children.find(c => chunkMap[c] && chunkMap[c].active);
+    for (const childId of children) {
+      const childActive = (childId === activeChildId) && isActive;
+      const childLeaf = walk(childId, lastId, childActive);
+      if (childLeaf && isActive && childActive) leafId = childLeaf;
     }
+    
+    return leafId || (isActive ? lastId : null);
   }
   
-  // Start walking from roots, attach to chat-lite root
+  // Start walking from roots
+  let activeLeafId = null;
   for (const r of roots) {
-    walk(r.id, rootId, 0);
+    // Find which root is active
+    const isActiveRoot = chunkMap[r] && chunkMap[r].active;
+    const leaf = walk(r.id, rootId, isActiveRoot);
+    if (leaf && isActiveRoot) activeLeafId = leaf;
   }
   
-  // Build active path by following active:true chunks
-  const activePath = [rootId];
-  let currentId = rootId;
-  let currentChunkId = null;
-  // Find all active chunks (the main branch in DZMM)
-  const activeChunkIds = new Set(chunks.filter(c => c.active).map(c => c.id));
-  // Also follow the leaf path: start from root chunk, follow children that are active or have active descendants
-  for (const r of roots) {
-    let cid = r.id;
-    while (cid) {
-      const chunk = chunkMap[cid];
-      if (!chunk) break;
-      // Find first active child (or any child if none active)
-      const children = chunk.children || [];
-      const activeChild = children.find(c => chunkMap[c] && chunkMap[c].active);
-      cid = activeChild || children.find(c => chunkMap[c]) || null;
+  // Build active path from the active leaf
+  const activePath = activeLeafId ? getBranchPathFromMap(messageMap, rootId, activeLeafId) : [rootId];
+  if (!activePath || activePath.length === 0) {
+    // Fallback: follow first child
+    const path = [rootId];
+    let cur = rootId;
+    while (true) {
+      const node = messageMap[cur];
+      if (!node || !node.children || node.children.length === 0) break;
+      cur = node.children[0];
+      path.push(cur);
     }
+    convActivePath = path;
+  } else {
+    convActivePath = activePath;
   }
-  // Simpler approach: walk the tree and follow the first child at each level
-  // (matches what chat-lite does natively)
-  currentId = rootId;
-  while (true) {
-    const node = messageMap[currentId];
-    if (!node || !node.children || node.children.length === 0) break;
-    const nextId = node.children[0];
-    activePath.push(nextId);
-    currentId = nextId;
+
+function getBranchPathFromMap(map, rootId, leafId) {
+  const path = [];
+  let cur = leafId;
+  while (cur && cur !== rootId) {
+    path.unshift(cur);
+    const node = map[cur];
+    if (!node || !node.parentId) break;
+    cur = node.parentId;
   }
+  path.unshift(rootId);
+  return path;
+}
+
+// Replace activePath later
+let convActivePath;
   
   return {
     id: uid(),
@@ -1449,7 +1464,7 @@ function convertDZMM(data) {
     systemPrompt: '',
     userIdentity: '',
     rootId,
-    activePath,
+    activePath: convActivePath,
     messageMap,
     createdAt: Date.now()
   };
