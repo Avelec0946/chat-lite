@@ -1427,6 +1427,7 @@ function convertDZMM(data) {
   }
   
   // Build active path from the active leaf
+  let convActivePath;
   const activePath = activeLeafId ? getBranchPathFromMap(messageMap, rootId, activeLeafId) : [rootId];
   if (!activePath || activePath.length === 0) {
     // Fallback: follow first child
@@ -1456,9 +1457,6 @@ function getBranchPathFromMap(map, rootId, leafId) {
   return path;
 }
 
-// Replace activePath later
-let convActivePath;
-  
   return {
     id: uid(),
     title: chat.title || '导入的对话',
