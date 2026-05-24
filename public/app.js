@@ -1047,23 +1047,23 @@ function onPinchMove(e) {
   const t1 = e.touches[0], t2 = e.touches[1];
   const newDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
   const scale = newDist / pinchState.dist;
-  const newZoom = Math.max(0.3, pinchState.startZoom * scale);
+  const newZoom = Math.max(0.3, Math.min(pinchState.startZoom * scale, 50));
   
-  // Calculate scroll offset to keep the pinch midpoint stable
-  const oldScrollLeft = pinchState.container.scrollLeft;
-  const oldScrollTop = pinchState.container.scrollTop;
+  // Record the SVG coordinate under the pinch midpoint BEFORE zoom
+  const container = pinchState.container;
+  const containerRect = container.getBoundingClientRect();
+  const midScreenX = pinchState.midX - containerRect.left;
+  const midScreenY = pinchState.midY - containerRect.top;
+  const svgX = (container.scrollLeft + midScreenX) / pinchState.startZoom;
+  const svgY = (container.scrollTop + midScreenY) / pinchState.startZoom;
   
   branchZoom = newZoom;
   applyBranchZoom();
   updateZoomInput();
   
-  // Adjust scroll to keep midpoint stationary
-  if (pinchState.svg) {
-    const containerRect = pinchState.container.getBoundingClientRect();
-    const scaleRatio = newZoom / pinchState.startZoom;
-    pinchState.container.scrollLeft = (oldScrollLeft + (pinchState.midX - containerRect.left)) * scaleRatio - (pinchState.midX - containerRect.left);
-    pinchState.container.scrollTop = (oldScrollTop + (pinchState.midY - containerRect.top)) * scaleRatio - (pinchState.midY - containerRect.top);
-  }
+  // After zoom, reposition so the same SVG coordinate is under the same screen position
+  container.scrollLeft = svgX * newZoom - midScreenX;
+  container.scrollTop = svgY * newZoom - midScreenY;
 }
 
 function onPinchEnd() {
