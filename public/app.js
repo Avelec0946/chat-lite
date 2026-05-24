@@ -368,14 +368,17 @@ function renderBreadcrumb(conv) {
   if (!bar) return;
   const chain = getActiveChain(conv);
   const display = chain.filter(m => m && m.role !== 'system');
-  if (display.length < 2) { bar.innerHTML = ''; bar.style.display = 'none'; return; }
+  if (display.length < 1) { bar.innerHTML = ''; bar.style.display = 'none'; return; }
   bar.style.display = 'flex';
   let html = '';
   display.forEach((m, i) => {
     const label = m.title || m.content.substring(0, 20) + (m.content.length > 20 ? '...' : '') || '(空)';
     const icon = m.role === 'user' ? '👤' : '🤖';
     const isLast = i === display.length - 1;
-    html += `<span class="breadcrumb-segment${isLast ? ' active' : ''}" data-id="${m.id}">${icon} ${escapeHtml(label)}</span>`;
+    // Show sibling count if this is the last node and parent has multiple children
+    const children = m.children || [];
+    const siblingLabel = (isLast && children.length > 1) ? ` +${children.length - 1}` : '';
+    html += `<span class="breadcrumb-segment${isLast ? ' active' : ''}" data-id="${m.id}">${icon} ${escapeHtml(label)}${siblingLabel ? `<span style="font-size:10px;color:var(--text2)">${siblingLabel}</span>` : ''}</span>`;
     if (!isLast) html += '<span class="breadcrumb-sep">▸</span>';
   });
   bar.innerHTML = html;
@@ -921,71 +924,85 @@ function closeBranchDrawer() {
 
 function buildTreeHTML(conv, nodeId, activePath, depth) {
   const msg = conv.messageMap[nodeId];
-  if (!msg || msg.role === 'system') return null;
+  if (!msg) return null;
 
-  const isActive = activePath.includes(nodeId);
-  const isLeaf = !msg.children || msg.children.length === 0;
-  const hasBranch = msg.children && msg.children.length > 1;
+  const isSystemRoot = msg.role === 'system' && !msg.parentId;
+  const skipMe = msg.role === 'system' && !isSystemRoot;
+  
+  if (!isSystemRoot && skipMe) return null;
 
-  const div = document.createElement('div');
-  div.className = `branch-node${isActive ? ' active' : ''}`;
-  div.style.paddingLeft = Math.min(depth * 16, 80) + 'px';
+  let div = null;
+  if (!isSystemRoot) {
+    const isActive = activePath.includes(nodeId);
+    const hasBranch = msg.children && msg.children.length > 1;
 
-  const icon = msg.role === 'user' ? '👤' : '🤖';
-  const title = msg.title || (msg.content ? msg.content.substring(0, 20) + (msg.content.length > 20 ? '...' : '') : '(空)');
-  const wc = msg.wordCount || countWords(msg.content || '');
+    div = document.createElement('div');
+    div.className = `branch-node${isActive ? ' active' : ''}`;
+    div.style.paddingLeft = Math.min(depth * 16, 80) + 'px';
 
-  div.innerHTML = `<span class="branch-icon">${icon}</span>
-    <span class="branch-title">${escapeHtml(title)}</span>
-    <span class="branch-wc">${wc}</span>`;
+    const icon = msg.role === 'user' ? '👤' : '🤖';
+    const title = msg.title || (msg.content ? msg.content.substring(0, 20) + (msg.content.length > 20 ? '...' : '') : '(空)');
+    const wc = msg.wordCount || countWords(msg.content || '');
 
-  div.addEventListener('click', () => {
-    // Switch active path to this node
-    const newPath = getBranchPath(conv, nodeId);
-    conv.activePath = newPath;
-    save();
-    renderMessages();
-    renderBranchInfo();
-  });
+    div.innerHTML = `<span class="branch-icon">${icon}</span>
+      <span class="branch-title">${escapeHtml(title)}</span>
+      <span class="branch-wc">${wc}</span>`;
 
-  // Rename on double-click
-  div.addEventListener('dblclick', (e) => {
-    e.stopPropagation();
-    const titleSpan = div.querySelector('.branch-title');
-    const oldTitle = msg.title || '';
-    const input = document.createElement('input');
-    input.className = 'branch-rename-input';
-    input.value = oldTitle;
-    input.addEventListener('blur', () => {
-      msg.title = input.value.trim() || oldTitle;
+    div.addEventListener('click', () => {
+      const newPath = getBranchPath(conv, nodeId);
+      conv.activePath = newPath;
       save();
-      renderBranchInfo();
       renderMessages();
+      renderBreadcrumb(conv);
+      openBranchDrawer();
     });
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') input.blur();
-      if (ev.key === 'Escape') { input.value = oldTitle; input.blur(); }
-    });
-    titleSpan.innerHTML = '';
-    titleSpan.appendChild(input);
-    input.focus();
-    input.select();
-  });
 
-  // Recurse children
-  if (msg.children && msg.children.length > 0) {
-    for (const childId of msg.children) {
-      const childEl = buildTreeHTML(conv, childId, activePath, depth + 1);
-      if (childEl) div.appendChild(childEl);
+    div.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      const titleSpan = div.querySelector('.branch-title');
+      const oldTitle = msg.title || '';
+      const input = document.createElement('input');
+      input.className = 'branch-rename-input';
+      input.value = oldTitle;
+      input.addEventListener('blur', () => {
+        msg.title = input.value.trim() || oldTitle;
+        save();
+        openBranchDrawer();
+        renderMessages();
+      });
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') input.blur();
+        if (ev.key === 'Escape') { input.value = oldTitle; input.blur(); }
+      });
+      titleSpan.innerHTML = '';
+      titleSpan.appendChild(input);
+      input.focus();
+      input.select();
+    });
+
+    if (hasBranch) div.classList.add('has-branch');
+
+    // Recurse children
+    if (msg.children && msg.children.length > 0) {
+      for (const childId of msg.children) {
+        const childEl = buildTreeHTML(conv, childId, activePath, depth + 1);
+        if (childEl) div.appendChild(childEl);
+      }
+    }
+  } else {
+    // System root: just recurse children, don't render self
+    if (msg.children && msg.children.length > 0) {
+      for (const childId of msg.children) {
+        const childEl = buildTreeHTML(conv, childId, activePath, depth);
+        if (childEl) {
+          if (!div) div = document.createElement('div');
+          div.appendChild(childEl);
+        }
+      }
     }
   }
 
-  // Branch indicator
-  if (hasBranch) {
-    div.classList.add('has-branch');
-  }
-
-  return div;
+  return div ? (div.children.length > 0 || !isSystemRoot ? div : null) : null;
 }
 
 // ===== File Upload =====
