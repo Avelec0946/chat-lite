@@ -1409,160 +1409,120 @@ function convertDZMM(data) {
     chunkMsgs[entry.chunk_id] = entry.messages || [];
   }
   
-  // Build chunk map
+  // Build chunk map  
   const chunkMap = {};
   for (const c of chunks) {
     chunkMap[c.id] = c;
   }
   
-  // Find root chunk(s) — those without parent
+  // Find root chunks
   const roots = chunks.filter(c => !c.parent);
   const rootId = uid();
   const rootMsg = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
   const messageMap = { [rootId]: rootMsg };
   
-  // Cache: chunkId → [nodeIds] so we don't create duplicates when reached from multiple parents
-  const chunkNodeCache = {};
+  // Helper to create a message node
+  function createMsgNode(role, content, parentId) {
+    const text = String(content || '');
+    const node = {
+      id: uid(), role, content: text,
+      parentId, children: [],
+      title: (role === 'user' ? (text.substring(0, 30) + (text.length > 30 ? '...' : '')) : '回复').replace(/\n/g, ' '),
+      wordCount: countWords(text),
+      versions: [{ content: text, timestamp: Date.now(), reason: 'import' }],
+      activeVersion: 0, files: [], createdAt: Date.now()
+    };
+    messageMap[node.id] = node;
+    messageMap[parentId].children.push(node.id);
+    return node.id;
+  }
   
-  // Walk the DZMM tree: build nodes for EVERY chunk reachable from roots
-  // Phase 1: walk all chunks and create node IDs (with dedup via chunkNodeCache)
-  function walkAll(chunkId, parentId) {
+  // Cache: chunkId → [nodeIds] so we can trace active path
+  const chunkNodeIds = {};
+  // Cache: chunkId → lastNodeId for child chunk attachment
+  const chunkLastNode = {};
+  
+  // Walk the tree: create individual nodes per message, NOT merged
+  function walk(chunkId, parentId) {
     const chunk = chunkMap[chunkId];
-    if (!chunk) return;
+    if (!chunk) return parentId;
     
-    // If already processed, just re-attach
-    if (chunkNodeCache[chunkId]) {
-      const cachedIds = chunkNodeCache[chunkId];
-      if (cachedIds.length > 0 && !messageMap[parentId].children.includes(cachedIds[0])) {
-        messageMap[parentId].children.push(cachedIds[0]);
+    // If already walked, just re-attach first node
+    if (chunkLastNode[chunkId] !== undefined) {
+      const lastId = chunkLastNode[chunkId];
+      const nids = chunkNodeIds[chunkId] || [];
+      if (nids.length > 0 && messageMap[nids[0]] && !messageMap[parentId].children.includes(nids[0])) {
+        messageMap[nids[0]].parentId = parentId;
+        messageMap[parentId].children.push(nids[0]);
       }
-      return;
+      return lastId;
     }
     
     const msgs = chunkMsgs[chunkId] || [];
+    let lastId = parentId;
+    
+    // Create individual nodes for each message (NO merging)
     const nodeIds = [];
-    let lastId = parentId;
-    
-    // Merge consecutive same-role messages in this chunk into single user/assistant nodes
-    if (msgs.length > 0) {
-      let userContent = '', assistantContent = '';
-      for (const m of msgs) {
-        const ct = (typeof m.content === 'string' ? m.content : String(m.content || ''));
-        if (m.role === 'user') userContent += (userContent ? '\n\n' : '') + ct;
-        else if (m.role === 'assistant') assistantContent += (assistantContent ? '\n\n' : '') + ct;
-      }
-      
-      if (userContent) {
-        const userText = String(userContent || '');
-        const userMsg = {
-          id: uid(), role: 'user', content: userText,
-          parentId: lastId, children: [],
-          title: (userText.substring(0, 30) + (userText.length > 30 ? '...' : '')).replace(/\n/g, ' '),
-          wordCount: countWords(userContent),
-          versions: [{ content: userContent, timestamp: Date.now(), reason: 'import' }],
-          activeVersion: 0, files: [], createdAt: Date.now()
-        };
-        messageMap[userMsg.id] = userMsg;
-        messageMap[lastId].children.push(userMsg.id);
-        lastId = userMsg.id;
-        nodeIds.push(userMsg.id);
-      }
-      if (assistantContent) {
-        const asstText = String(assistantContent || '');
-        const asstMsg = {
-          id: uid(), role: 'assistant', content: asstText,
-          parentId: lastId, children: [],
-          title: '回复',
-          wordCount: countWords(assistantContent),
-          versions: [{ content: assistantContent, timestamp: Date.now(), reason: 'import' }],
-          activeVersion: 0, files: [], createdAt: Date.now()
-        };
-        messageMap[asstMsg.id] = asstMsg;
-        messageMap[lastId].children.push(asstMsg.id);
-        lastId = asstMsg.id;
-        nodeIds.push(asstMsg.id);
-      }
+    for (const m of msgs) {
+      const ct = (typeof m.content === 'string' ? m.content : String(m.content || ''));
+      if (!ct) continue;
+      lastId = createMsgNode(m.role || 'user', ct, lastId);
+      nodeIds.push(lastId);
     }
     
-    chunkNodeCache[chunkId] = nodeIds;
+    chunkNodeIds[chunkId] = nodeIds;
+    chunkLastNode[chunkId] = lastId;
     
-    // Walk child chunks — they attach to lastId
+    // Walk children — they attach to lastId
     const children = (chunk.children || []).filter(c => chunkMap[c]);
     for (const childId of children) {
-      walkAll(childId, lastId);
+      walk(childId, lastId);
     }
+    
+    return lastId;
   }
   
-  // Phase 1: walk everything
+  // Walk all chunks from each root
   for (const r of roots) {
-    walkAll(r.id, rootId);
+    walk(r.id, rootId);
   }
   
-  // Phase 2: build activePath by following 'active' flags
-  let activeLeafId = null;
-  function walkActive(chunkId, parentId, nodeSideIds) {
+  // Build activePath: follow chunk.active chain, use chunkNodeIds cache directly
+  const convActivePath = [rootId];
+  function followActive(chunkId) {
     const chunk = chunkMap[chunkId];
-    if (!chunk) return null;
+    if (!chunk) return;
     
-    const nodeIds = chunkNodeCache[chunkId] || [];
-    let lastId = parentId;
-    let leaf = null;
-    
-    // Walk through the nodes for this chunk
+    // Push all nodes from this chunk
+    const nodeIds = chunkNodeIds[chunkId] || [];
     for (const nid of nodeIds) {
-      lastId = nid;
-      leaf = nid;
+      convActivePath.push(nid);
     }
     
-    // If this chunk has NO messages (empty chunk), but has children, recurse into children
-    if (nodeIds.length === 0) {
-      // Recurse into children directly
-      const children = (chunk.children || []).filter(c => chunkMap[c]);
-      const activeChild = children.find(c => chunkMap[c] && chunkMap[c].active);
-      for (const childId of children) {
-        if (childId === activeChild) {
-          const childLeaf = walkActive(childId, lastId, nodeSideIds);
-          if (childLeaf) leaf = childLeaf;
-        }
-      }
-      return leaf;
-    }
-    
-    // Recurse into children
+    // Find active child chunk and recurse
     const children = (chunk.children || []).filter(c => chunkMap[c]);
-    const activeChild = children.find(c => chunkMap[c] && chunkMap[c].active);
-    for (const childId of children) {
-      if (childId === activeChild) {
-        const childLeaf = walkActive(childId, lastId, nodeSideIds);
-        if (childLeaf) leaf = childLeaf;
-      }
+    const activeChild = children.find(c => chunkMap[c]?.active);
+    if (activeChild) {
+      followActive(activeChild);
     }
-    
-    return leaf;
   }
   
   for (const r of roots) {
-    if (chunkMap[r] && chunkMap[r].active) {
-      activeLeafId = walkActive(r.id, rootId, nodeSideIds);
+    if (chunkMap[r]?.active) {
+      followActive(r.id);
+      break;
     }
   }
   
-  // Build activePath
-  let convActivePath;
-  const activePath = activeLeafId ? getBranchPathFromMap(messageMap, rootId, activeLeafId) : null;
-  if (!activePath || activePath.length <= 1) {
-    // Fallback: follow first child from root
-    const path = [rootId];
+  // If activePath failed, fallback to first-child chain
+  if (convActivePath.length <= 1) {
     let cur = rootId;
     while (true) {
       const node = messageMap[cur];
       if (!node || !node.children || node.children.length === 0) break;
       cur = node.children[0];
-      path.push(cur);
+      convActivePath.push(cur);
     }
-    convActivePath = path;
-  } else {
-    convActivePath = activePath;
   }
 
 function getBranchPathFromMap(map, rootId, leafId) {
