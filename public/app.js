@@ -1010,12 +1010,20 @@ function closeBranchDrawer() {
 
 // Pinch-zoom for mobile
 let pinchState = null;
+let longPressTimer = null;
 function initPinchZoom() {
   const container = document.querySelector('.branch-drawer-body');
   if (!container) return;
   container.addEventListener('touchstart', onPinchStart, {passive:false});
   container.addEventListener('touchmove', onPinchMove, {passive:false});
   container.addEventListener('touchend', onPinchEnd);
+  // Desktop: Alt+wheel zoom, mouse drag pan
+  container.addEventListener('wheel', onWheelZoom, {passive:false});
+  container.addEventListener('mousedown', onMouseDown);
+  // Mobile long-press for color
+  container.addEventListener('touchstart', onLongPressStart, {passive:false});
+  container.addEventListener('touchend', onLongPressEnd);
+  container.addEventListener('touchmove', onLongPressCancel);
 }
 
 function removePinchListeners() {
@@ -1024,8 +1032,66 @@ function removePinchListeners() {
   container.removeEventListener('touchstart', onPinchStart);
   container.removeEventListener('touchmove', onPinchMove);
   container.removeEventListener('touchend', onPinchEnd);
+  container.removeEventListener('wheel', onWheelZoom);
+  container.removeEventListener('mousedown', onMouseDown);
+  container.removeEventListener('touchstart', onLongPressStart);
+  container.removeEventListener('touchend', onLongPressEnd);
+  container.removeEventListener('touchmove', onLongPressCancel);
   pinchState = null;
+  longPressTimer = null;
 }
+
+// Alt+wheel zoom on desktop
+function onWheelZoom(e) {
+  if (!e.altKey && !e.metaKey) return;
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? -0.05 : 0.05;
+  const container = e.currentTarget;
+  const rect = container.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const svgX = (container.scrollLeft + mx) / branchZoom;
+  const svgY = (container.scrollTop + my) / branchZoom;
+  branchZoom = Math.max(0.3, Math.min(branchZoom + delta, 50));
+  applyBranchZoom();
+  updateZoomInput();
+  container.scrollLeft = svgX * branchZoom - mx;
+  container.scrollTop = svgY * branchZoom - my;
+}
+
+// Mouse drag to pan on desktop
+let mouseDrag = null;
+function onMouseDown(e) {
+  if (e.button !== 0) return;
+  mouseDrag = { x: e.clientX, y: e.clientY, sx: e.currentTarget.scrollLeft, sy: e.currentTarget.scrollTop };
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
+}
+function onMouseMove(e) {
+  if (!mouseDrag) return;
+  const dx = mouseDrag.x - e.clientX, dy = mouseDrag.y - e.clientY;
+  document.querySelector('.branch-drawer-body').scrollLeft = mouseDrag.sx + dx;
+  document.querySelector('.branch-drawer-body').scrollTop = mouseDrag.sy + dy;
+}
+function onMouseUp() { mouseDrag = null; window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); }
+
+// Mobile long-press for node color
+function onLongPressStart(e) {
+  if (e.touches.length !== 1) return;
+  longPressTimer = setTimeout(() => {
+    const touch = e.touches[0];
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    const g = el?.closest('.tree-node');
+    if (g) {
+      const onclick = g.getAttribute('onclick') || '';
+      const idMatch = onclick.match(/'([^']+)'/);
+      if (idMatch && window.svgNodeColor) {
+        window.svgNodeColor(idMatch[1]);
+      }
+    }
+  }, 600);
+}
+function onLongPressEnd() { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } }
+function onLongPressCancel() { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } }
 
 function onPinchStart(e) {
   if (e.touches.length !== 2) return;
