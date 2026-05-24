@@ -995,28 +995,7 @@ function openBranchDrawer() {
   info.textContent = `分支总览 — ${chainLen} 条消息 · ${totalWords} 字`;
 
   tree.innerHTML = renderTreeSVG(conv);
-  
-  // Center on root node and set zoom origin
-  setTimeout(() => {
-    const svg = tree.querySelector('.branch-svg');
-    const container = tree.closest('.branch-drawer-content');
-    if (!svg || !container) return;
-    const rootNode = svg.querySelector('.tree-node');
-    if (!rootNode) return;
-    // Get root node position in the SVG coordinate system
-    const transform = rootNode.getAttribute('transform') || '';
-    const tx = parseFloat((transform.match(/translate\(([^,]+),/) || [])[1]) || 0;
-    const ty = parseFloat((transform.match(/,\s*([^)]+)\)/) || [])[1]) || 0;
-    // Set zoom origin to root node center
-    svg.style.transformOrigin = `${tx + 90}px ${ty + 22}px`;
-    // Scroll container to center root
-    const cRect = container.getBoundingClientRect();
-    // Root position in viewport = position_in_svg * zoom + scroll offset
-    const rootX = (tx + 90) * branchZoom - cRect.width / 2;
-    const rootY = (ty + 22) * branchZoom - cRect.height / 2;
-    container.scrollLeft = Math.max(0, rootX);
-    container.scrollTop = Math.max(0, rootY);
-  }, 150);
+  applyBranchZoom();
 }
 
 let branchZoom = 1;
@@ -1150,8 +1129,31 @@ window.svgNodeClick = function(nodeId) {
 
 function applyBranchZoom() {
   const svg = document.querySelector('.branch-svg');
-  if (svg) { svg.style.transform = `scale(${branchZoom})`; svg.style.transformOrigin = 'top left'; }
+  if (!svg) return;
+  const origW = parseInt(svg.getAttribute('data-orig-w') || svg.getAttribute('width'));
+  const origH = parseInt(svg.getAttribute('data-orig-h') || svg.getAttribute('height'));
+  if (!svg.hasAttribute('data-orig-w')) {
+    svg.setAttribute('data-orig-w', origW);
+    svg.setAttribute('data-orig-h', origH);
+  }
+  svg.setAttribute('width', Math.round(origW * branchZoom));
+  svg.setAttribute('height', Math.round(origH * branchZoom));
+  applyBranchCenter();
 }
+function applyBranchCenter() {
+  const container = document.querySelector('.branch-drawer-body');
+  const svg = document.querySelector('.branch-svg');
+  if (!container || !svg) return;
+  const rootNode = svg.querySelector('.tree-node');
+  if (!rootNode) return;
+  const transformAttr = rootNode.getAttribute('transform') || '';
+  const match = transformAttr.match(/translate\(([^,]+),\s*([^)]+)\)/);
+  const tx = parseFloat(match?.[1]) || 0;
+  const ty = parseFloat(match?.[2]) || 0;
+  container.scrollLeft = Math.max(0, (tx + 90) * branchZoom - container.clientWidth / 2);
+  container.scrollTop = Math.max(0, (ty + 22) * branchZoom - container.clientHeight / 2);
+}
+
 function updateZoomInput() {
   const inp = document.getElementById('zoom-input');
   if (inp) inp.value = Math.round(branchZoom * 100);
