@@ -1052,10 +1052,11 @@ function renderTreeSVG(conv) {
     const isActive = conv.activePath.includes(nodeId);
     const hasChildren = (msg.children || []).length > 0;
     const icon = msg.role === 'user' ? '👤' : '🤖';
-    const raw = (msg.title || msg.content || '').replace(/\\s+/g, ' ').trim() || '(空)';
+    const rawTitle = (msg.title || msg.content || '');
+    const cleanTitle = (typeof rawTitle === 'string' ? rawTitle : '').replace(/\s+/g, ' ').trim() || '(空)';
     // Truncate by visual width: CJK ≈ 2 units, ASCII ≈ 1 unit
     let title = '', w = 0, maxW = 16;
-    for (const ch of raw) { 
+    for (const ch of cleanTitle) { 
       const cw = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? 2 : 1;
       if (w + cw > maxW) { title += '…'; break; }
       title += ch; w += cw;
