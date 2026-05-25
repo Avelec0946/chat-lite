@@ -15,6 +15,9 @@ let settings = loadSettings();
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 
 function save() {
+  // Stamp current conversation with updatedAt for merge resolution
+  const conv = state.conversations.find(c => c.id === state.currentId);
+  if (conv) conv.updatedAt = Date.now();
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       conversations: state.conversations,
@@ -187,21 +190,36 @@ const apiKeyInput = $('api-key-input');
 
 // ===== Init =====
 async function init() {
-  // Try loading from server first (跨设备同步)
+  // Merge server + localStorage data by timestamp (newest wins)
+  loadData(); // Load localStorage first as baseline
   try {
     const resp = await fetch('/api/load');
     const data = await resp.json();
     if (data.conversations && data.conversations.length > 0) {
-      state.conversations = data.conversations;
-      state.currentId = data.currentId;
-    } else {
-      loadData();
+      // Merge: for each server conversation, keep the newer version
+      const localMap = {};
+      for (const c of state.conversations) { localMap[c.id] = c; }
+      for (const sc of data.conversations) {
+        const lc = localMap[sc.id];
+        if (!lc) {
+          // Server has a conversation that's not local — add it
+          state.conversations.push(sc);
+        } else if ((sc.updatedAt || 0) > (lc.updatedAt || 0)) {
+          // Server has newer version — replace local
+          const idx = state.conversations.findIndex(c => c.id === sc.id);
+          if (idx >= 0) state.conversations[idx] = sc;
+        }
+        // else: local is newer, keep it
+      }
+      // If server has a currentId we don't have, use it
+      if (data.currentId && !state.conversations.find(c => c.id === data.currentId)) {
+        state.currentId = data.currentId;
+      }
     }
   } catch(e) {
-    // Server not available, fall back to localStorage
-    loadData();
+    // Server not available — localStorage baseline is already loaded
   }
-  // Migrate any old-format conversations loaded from server
+  // Migrate any old-format conversations
   for (const conv of state.conversations) {
     if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) {
       migrateV1toV2(conv);
