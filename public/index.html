@@ -69,8 +69,11 @@
         </button>
         <input type="file" id="file-input" accept=".txt,.md,.json,.csv,.js,.py,.html,.css,.xml,.yaml,.yml,.log" multiple style="display:none">
         <div id="chat-input" class="chat-input" contenteditable="true" data-placeholder="输入消息..." role="textbox"></div>
-        <button id="btn-send" class="btn btn-send" title="发送">
+        <button id="btn-send" class="btn btn-send" title="发送" style="display:flex">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+        <button id="btn-stop" class="btn btn-send" title="停止" style="display:none">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
       </div>
     </div>

@@ -271,6 +271,13 @@ async function init() {
 
   // Event listeners
   btnSend.addEventListener('click', sendMessage);
+  var btnStop = document.getElementById('btn-stop');
+  if (btnStop) btnStop.addEventListener('click', function() {
+    if (state.abortController) {
+      state.abortController.abort();
+      state.abortController = null;
+    }
+  });
   chatInput.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -960,7 +967,10 @@ async function sendFromMessage(context) {
   if (!conv) return;
 
   state.loading = true;
+  // Create AbortController for this request
+  state.abortController = new AbortController();
   updateSendButton();
+  toggleSendStop();
   setStatus('busy');
 
   // Add placeholder assistant message (tree node)
@@ -1001,7 +1011,8 @@ async function sendFromMessage(context) {
         stream: true,
         thinkingEnabled: conv.thinkingEnabled !== false,
         apiKey: settings.apiKey || undefined
-      })
+      }),
+      signal: state.abortController?.signal
     });
 
     if (!resp.ok) {
@@ -1062,7 +1073,9 @@ async function sendFromMessage(context) {
     setStatus('err');
   } finally {
     state.loading = false;
+    state.abortController = null;
     updateSendButton();
+    toggleSendStop();
     renderMessages();
     scrollToBottom();
   }
@@ -1719,6 +1732,12 @@ window.nextVersion = function(msgId) {
 };
 
 // ===== UI Helpers =====
+function toggleSendStop() {
+  var send = document.getElementById('btn-send');
+  var stop = document.getElementById('btn-stop');
+  if (send) send.style.display = state.loading ? 'none' : 'flex';
+  if (stop) stop.style.display = state.loading ? 'flex' : 'none';
+}
 function updateSendButton() {
   const hasText = chatInput.innerText.trim().length > 0;
   const hasFiles = state.pendingFiles?.length > 0;
