@@ -95,7 +95,7 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return JSON.parse(raw);
   } catch(e) {}
-  return { systemPrompt: '', userIdentity: '', thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6' };
+  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6' };
 }
 
 function saveSettings() {
@@ -220,8 +220,6 @@ async function init() {
 
   // Apply settings to UI
   thinkingToggle.checked = settings.thinkingEnabled;
-  systemPromptInput.value = settings.systemPrompt || '';
-  userIdentityInput.value = settings.userIdentity || '';
   apiKeyInput.value = settings.apiKey || '';
   applyDisplaySettings();
 
@@ -297,8 +295,6 @@ function restoreConversationState() {
     const conv = newConversation();
     conv.title = '对话 1';
     conv.thinkingEnabled = settings.thinkingEnabled;
-    conv.systemPrompt = settings.systemPrompt || '';
-    conv.userIdentity = settings.userIdentity || '';
     state.conversations.push(conv);
     state.currentId = conv.id;
     save();
@@ -392,8 +388,6 @@ function newChat() {
   const conv = newConversation();
   conv.title = `对话 ${state.conversations.length + 1}`;
   conv.thinkingEnabled = settings.thinkingEnabled;
-  conv.systemPrompt = settings.systemPrompt || '';
-  conv.userIdentity = settings.userIdentity || '';
   state.conversations.push(conv);
   state.currentId = conv.id;
   save();
@@ -787,11 +781,11 @@ function buildContext(conv) {
 
   // System prompt
   const sysParts = [];
-  if (conv.systemPrompt || settings.systemPrompt) {
-    sysParts.push(conv.systemPrompt || settings.systemPrompt);
+  if (conv.systemPrompt) {
+    sysParts.push(conv.systemPrompt);
   }
-  if (conv.userIdentity || settings.userIdentity) {
-    sysParts.push('用户身份：' + (conv.userIdentity || settings.userIdentity));
+  if (conv.userIdentity) {
+    sysParts.push('用户身份：' + conv.userIdentity);
   }
   if (sysParts.length > 0) {
     msgs.push({ role: 'system', content: sysParts.join('\n\n') });
@@ -1386,8 +1380,8 @@ function toggleSettings(open) {
   if (open) {
     const conv = currentConv();
     thinkingToggle.checked = conv ? conv.thinkingEnabled : settings.thinkingEnabled;
-    systemPromptInput.value = conv?.systemPrompt || settings.systemPrompt || '';
-    userIdentityInput.value = conv?.userIdentity || settings.userIdentity || '';
+    systemPromptInput.value = conv?.systemPrompt || '';
+    userIdentityInput.value = conv?.userIdentity || '';
     apiKeyInput.value = settings.apiKey || '';
     // Display settings
     const fsSelect = document.getElementById('font-size-select');
