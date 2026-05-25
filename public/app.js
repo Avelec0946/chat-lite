@@ -1393,8 +1393,6 @@ function toggleSettings(open) {
 
 function saveSettingsHandler() {
   settings.thinkingEnabled = thinkingToggle.checked;
-  settings.systemPrompt = systemPromptInput.value.trim();
-  settings.userIdentity = userIdentityInput.value.trim();
   settings.apiKey = apiKeyInput.value.trim();
   // Display settings
   const fsSelect = document.getElementById('font-size-select');
@@ -1404,12 +1402,12 @@ function saveSettingsHandler() {
   applyDisplaySettings();
   saveSettings();
 
-  // Apply to current conversation
+  // Per-conversation only: save prompts directly from input fields
   const conv = currentConv();
   if (conv) {
-    conv.thinkingEnabled = settings.thinkingEnabled;
-    conv.systemPrompt = settings.systemPrompt;
-    conv.userIdentity = settings.userIdentity;
+    conv.thinkingEnabled = thinkingToggle.checked;
+    conv.systemPrompt = systemPromptInput.value.trim();
+    conv.userIdentity = userIdentityInput.value.trim();
     save();
   }
 
