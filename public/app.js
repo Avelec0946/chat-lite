@@ -2036,10 +2036,19 @@ function parseCharacterCard(buffer) {
           keyword = td1.decode(textBytes.slice(0, nullIdx));
           value = td1.decode(textBytes.slice(nullIdx + 1));
         }
-        // Decode value: try direct JSON, fallback to base64
+        function decodeB64(b64) {
+          try {
+            // atob gives bytes as 0-255 codepoints; convert via TextDecoder
+            const raw = atob(b64);
+            const buf = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+            return new TextDecoder('utf-8').decode(buf);
+          } catch(e) { return null; }
+        }
         function tryDecode(val) {
           try { return JSON.parse(val); } catch(e) {}
-          try { return JSON.parse(atob(val)); } catch(e) {}
+          var dec = decodeB64(val);
+          if (dec) { try { return JSON.parse(dec); } catch(e) {} }
           return null;
         }
         if (keyword === 'chara') {
