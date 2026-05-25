@@ -818,20 +818,52 @@ function saveEdit(msgId, newContent) {
     return;
   }
 
-  // User message - edit and branch if needed
-  msg.content = newContent;
-  msg.wordCount = countWords(newContent);
-  msg.title = newContent.substring(0, 30) + (newContent.length > 30 ? '...' : '');
-
-  const msgIdx = conv.activePath.indexOf(msgId);
-  if (msgIdx >= 0 && msgIdx < conv.activePath.length - 1) {
-    // There are messages after this - truncate and resend
-    conv.activePath = conv.activePath.slice(0, msgIdx + 1);
+  // User message - save old version and create a new sibling node
+  if (newContent !== msg.content) {
+    // Save old content to versions
+    msg.versions.push({ content: msg.content, timestamp: Date.now(), reason: 'edited' });
+    msg.activeVersion = 0;
+    
+    // Create a new user message node as sibling
+    const newUserMsg = {
+      id: uid(),
+      role: 'user',
+      content: newContent,
+      parentId: msg.parentId,
+      children: [],
+      title: newContent.substring(0, 30) + (newContent.length > 30 ? '...' : ''),
+      wordCount: countWords(newContent),
+      versions: [{ content: newContent, timestamp: Date.now(), reason: 'original' }],
+      activeVersion: 0,
+      files: msg.files || [],
+      createdAt: Date.now()
+    };
+    conv.messageMap[newUserMsg.id] = newUserMsg;
+    
+    // Wire up siblings
+    msg.children.forEach(function(cId) {
+      var child = getMsg(conv, cId);
+      if (child) { child.parentId = newUserMsg.id; newUserMsg.children.push(cId); }
+    });
+    msg.children = [];
+    
+    // Insert as sibling
+    var parent = getMsg(conv, msg.parentId);
+    if (parent) {
+      var siblingIdx = parent.children.indexOf(msgId);
+      if (siblingIdx >= 0) parent.children.splice(siblingIdx + 1, 0, newUserMsg.id);
+      else parent.children.push(newUserMsg.id);
+    }
+    
+    // Update active path: replace msgId with newUserMsg.id
+    var msgIdx = conv.activePath.indexOf(msgId);
+    if (msgIdx >= 0) conv.activePath[msgIdx] = newUserMsg.id;
+    
+  } else {
+    // Content unchanged, just exit edit mode
+    msg.editing = false;
     save();
     renderMessages();
-    msg.editing = false;
-    const context = buildContext(conv);
-    sendFromMessage(context);
     return;
   }
 
