@@ -329,6 +329,90 @@ function restoreConversationState() {
   }
 }
 
+
+  // Character card: import PNG
+  $('btn-import-card').addEventListener('click', () => { document.getElementById('card-import-file').click(); });
+  document.getElementById('card-import-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const card = parseCharacterCard(buf);
+      if (!card) { alert('未找到角色卡数据'); return; }
+      const data = card.data || card;
+      document.getElementById('card-editor').style.display = 'block';
+      document.getElementById('card-name').value = data.name || '';
+      document.getElementById('card-desc').value = data.description || '';
+      document.getElementById('card-personality').value = data.personality || '';
+      document.getElementById('card-scenario').value = data.scenario || '';
+      document.getElementById('card-firstmes').value = data.first_mes || '';
+      document.getElementById('card-example').value = data.mes_example || '';
+      document.getElementById('card-sysprompt').value = data.system_prompt || '';
+      updateCardPreview();
+    } catch(err) { alert('导入失败: ' + err.message); }
+    e.target.value = '';
+  });
+
+  $('btn-card-fill').addEventListener('click', () => {
+    document.getElementById('card-editor').style.display = 'block';
+    const p = updateCardPreview();
+    document.getElementById('system-prompt').value = p;
+  });
+
+  $('btn-export-card').addEventListener('click', async () => {
+    const avatarFile = document.getElementById('card-avatar').files[0];
+    if (!avatarFile) { alert('请先选择头像 PNG 文件'); return; }
+    try {
+      const fields = {
+        name: document.getElementById('card-name').value,
+        description: document.getElementById('card-desc').value,
+        personality: document.getElementById('card-personality').value,
+        scenario: document.getElementById('card-scenario').value,
+        first_mes: document.getElementById('card-firstmes').value,
+        mes_example: document.getElementById('card-example').value,
+        system_prompt: document.getElementById('card-sysprompt').value,
+        creator: '',
+        creator_notes: '',
+        character_version: '1.0'
+      };
+      const blob = await generateCharacterCard(fields, avatarFile);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (fields.name || 'character') + '.png';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch(err) { alert('导出失败: ' + err.message); }
+  });
+
+  document.getElementById('card-avatar').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      document.getElementById('card-avatar-preview').src = URL.createObjectURL(file);
+      document.getElementById('card-avatar-preview').style.display = 'block';
+    }
+  });
+
+  ['card-name','card-desc','card-personality','card-scenario','card-firstmes','card-example','card-sysprompt'].forEach(function(id) {
+    document.getElementById(id).addEventListener('input', updateCardPreview);
+  });
+
+function updateCardPreview() {
+  var f = {
+    name: document.getElementById('card-name').value,
+    description: document.getElementById('card-desc').value,
+    personality: document.getElementById('card-personality').value,
+    scenario: document.getElementById('card-scenario').value,
+    first_mes: document.getElementById('card-firstmes').value,
+    mes_example: document.getElementById('card-example').value,
+    system_prompt: document.getElementById('card-sysprompt').value
+  };
+  var p = buildCardPrompt(f);
+  document.getElementById('card-preview').textContent = p || '(预览系统提示词)';
+  return p;
+}
+
+
 // ===== Sidebar =====
 function renderSidebar() {
   const query = (document.getElementById('conv-search-input')?.value || '').trim().toLowerCase();
@@ -1901,6 +1985,149 @@ function buildTreeDebug(conv) {
   }
   return walk(conv.rootId, 0);
 }
+
+
+// ===== PNG Character Card utilities =====
+
+// Parse a PNG file ArrayBuffer and extract character card JSON
+function parseCharacterCard(buffer) {
+  const bytes = new Uint8Array(buffer);
+  // PNG signature check
+  const sig = [137,80,78,71,13,10,26,10];
+  for (let i = 0; i < 8; i++) if (bytes[i] !== sig[i]) throw new Error('Not a valid PNG file');
+  
+  let offset = 8;
+  let charaJSON = null, ccv3JSON = null;
+  
+  while (offset < bytes.length) {
+    const length = (bytes[offset] << 24) | (bytes[offset+1] << 16) | (bytes[offset+2] << 8) | bytes[offset+3];
+    const type = String.fromCharCode(bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7]);
+    const dataStart = offset + 8;
+    
+    if (type === 'tEXt') {
+      const textBytes = bytes.slice(dataStart, dataStart + length);
+      let nullIdx = -1;
+      for (let i = 0; i < textBytes.length; i++) { if (textBytes[i] === 0) { nullIdx = i; break; } }
+      if (nullIdx >= 0) {
+        const keyword = String.fromCharCode(...textBytes.slice(0, nullIdx));
+        const value = String.fromCharCode(...textBytes.slice(nullIdx + 1));
+        if (keyword === 'chara') {
+          try { charaJSON = JSON.parse(value); } catch(e) {}
+        } else if (keyword === 'ccv3') {
+          try { ccv3JSON = JSON.parse(atob(value)); } catch(e) {}
+        }
+      }
+    }
+    
+    offset = dataStart + length + 4; // skip CRC
+  }
+  
+  return ccv3JSON || charaJSON;
+}
+
+// Generate a PNG character card from fields + avatar image buffer
+function generateCharacterCard(fields, avatarBuffer) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        const srcBytes = new Uint8Array(e.target.result);
+        // Validate PNG
+        const sig = [137,80,78,71,13,10,26,10];
+        for (let i = 0; i < 8; i++) if (srcBytes[i] !== sig[i]) throw new Error('Avatar must be a PNG file');
+        
+        // Build card JSON (V2 format via ccv3 for longer content support)
+        const cardData = {
+          data: {
+            name: fields.name || '',
+            description: fields.description || '',
+            personality: fields.personality || '',
+            scenario: fields.scenario || '',
+            first_mes: fields.first_mes || '',
+            mes_example: fields.mes_example || '',
+            system_prompt: fields.system_prompt || '',
+            creator: fields.creator || '',
+            creator_notes: fields.creator_notes || '',
+            character_version: fields.character_version || '1.0'
+          }
+        };
+        const jsonStr = JSON.stringify(cardData);
+        const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
+        const tEXtData = 'ccv3\0' + b64;
+        
+        // Find IEND position in source
+        let iendPos = -1;
+        let offset = 8;
+        while (offset < srcBytes.length - 8) {
+          const len = (srcBytes[offset] << 24) | (srcBytes[offset+1] << 16) | (srcBytes[offset+2] << 8) | srcBytes[offset+3];
+          const type = String.fromCharCode(srcBytes[offset+4], srcBytes[offset+5], srcBytes[offset+6], srcBytes[offset+7]);
+          if (type === 'IEND') { iendPos = offset; break; }
+          offset += 8 + len + 4;
+        }
+        if (iendPos < 0) { reject(new Error('Invalid PNG')); return; }
+        
+        // Build output: copy everything up to IEND, insert tEXt chunk, then IEND
+        const beforeIEND = srcBytes.slice(0, iendPos);
+        const iendChunk = srcBytes.slice(iendPos);
+        
+        const tEXtBytes = new TextEncoder().encode(tEXtData);
+        const chunkLen = tEXtBytes.length;
+        
+        // Build chunk: length(4) + 'tEXt'(4) + data + CRC(4)
+        const chunk = new Uint8Array(4 + 4 + chunkLen + 4);
+        chunk[0] = (chunkLen >> 24) & 0xFF;
+        chunk[1] = (chunkLen >> 16) & 0xFF;
+        chunk[2] = (chunkLen >> 8) & 0xFF;
+        chunk[3] = chunkLen & 0xFF;
+        chunk[4] = 116; chunk[5] = 69; chunk[6] = 88; chunk[7] = 116; // 'tEXt'
+        chunk.set(tEXtBytes, 8);
+        
+        // CRC32 (simplified)
+        const crcData = chunk.slice(4, 8 + chunkLen);
+        const crc = crc32(crcData);
+        chunk[8 + chunkLen] = (crc >> 24) & 0xFF;
+        chunk[8 + chunkLen + 1] = (crc >> 16) & 0xFF;
+        chunk[8 + chunkLen + 2] = (crc >> 8) & 0xFF;
+        chunk[8 + chunkLen + 3] = crc & 0xFF;
+        
+        const result = new Uint8Array(beforeIEND.length + chunk.length + iendChunk.length);
+        result.set(beforeIEND, 0);
+        result.set(chunk, beforeIEND.length);
+        result.set(iendChunk, beforeIEND.length + chunk.length);
+        
+        resolve(new Blob([result], { type: 'image/png' }));
+      } catch(err) { reject(err); }
+    };
+    reader.readAsArrayBuffer(avatarBuffer);
+  });
+}
+
+// Build system prompt from card fields
+function buildCardPrompt(fields) {
+  const parts = [];
+  if (fields.name) parts.push(fields.name);
+  if (fields.description) parts.push(fields.description);
+  if (fields.personality) parts.push('性格：' + fields.personality);
+  if (fields.scenario) parts.push('场景：' + fields.scenario);
+  const header = parts.length > 0 ? '[角色：' + parts.join('；') + ']' : '';
+  const sys = fields.system_prompt || '';
+  const example = fields.mes_example ? '\n# 对话示例\n' + fields.mes_example : '';
+  return [header, sys, example].filter(Boolean).join('\n\n');
+}
+
+// CRC32 table
+const crc32Table = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i;
+  for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+  crc32Table[i] = c;
+}
+function crc32(data) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < data.length; i++) crc = crc32Table[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
 
 // ===== Start =====
 document.addEventListener('DOMContentLoaded', init);

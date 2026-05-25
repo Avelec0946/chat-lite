@@ -139,6 +139,24 @@
           <input type="password" id="api-key-input" class="setting-input" placeholder="留空使用 config.json 默认">
         </label>
         <div class="setting-divider"></div>
+        <span class="setting-section-title">角色卡</span>
+        <div class="card-import-row">
+          <button id="btn-import-card" class="btn btn-small">导入 PNG 角色卡</button>
+          <input type="file" id="card-import-file" accept=".png" style="display:none">
+          <button id="btn-card-fill" class="btn btn-small">快捷填入提示词</button>
+        </div>
+        <div id="card-editor" class="card-editor" style="display:none">
+          <label class="card-field"><span>名称</span><input id="card-name" class="card-input"></label>
+          <label class="card-field"><span>简介</span><textarea id="card-desc" class="card-textarea" rows="2"></textarea></label>
+          <label class="card-field"><span>性格</span><textarea id="card-personality" class="card-textarea" rows="2"></textarea></label>
+          <label class="card-field"><span>场景</span><textarea id="card-scenario" class="card-textarea" rows="2"></textarea></label>
+          <label class="card-field"><span>开场白</span><textarea id="card-firstmes" class="card-textarea" rows="3"></textarea></label>
+          <label class="card-field"><span>示例对话</span><textarea id="card-example" class="card-textarea" rows="3"></textarea></label>
+          <label class="card-field"><span>系统提示词</span><textarea id="card-sysprompt" class="card-textarea" rows="3"></textarea></label>
+          <label class="card-field"><span>头像</span><input type="file" id="card-avatar" accept=".png"><img id="card-avatar-preview" class="card-avatar-preview" style="display:none"></label>
+          <div id="card-preview" class="card-preview"></div>
+          <button id="btn-export-card" class="btn btn-small">导出 PNG 角色卡</button>
+        </div>
         <span class="setting-section-title">显示</span>
         <label class="setting-row">
           <span>字体大小</span>
