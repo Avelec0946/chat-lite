@@ -345,7 +345,12 @@ function restoreConversationState() {
       document.getElementById('card-desc').value = data.description || '';
       document.getElementById('card-personality').value = data.personality || '';
       document.getElementById('card-scenario').value = data.scenario || '';
-      document.getElementById('card-firstmes').value = data.first_mes || '';
+      var fmes = (data.first_mes || '');
+      // Strip HTML-like content tags
+      fmes = fmes.replace(/<content>/gi, '').replace(/<\/content>/gi, '');
+      fmes = fmes.replace(/<StatusBlock>[\s\S]*?<\/StatusBlock>/gi, '');
+      fmes = fmes.replace(/<status>[\s\S]*?<\/status>/gi, '');
+      document.getElementById('card-firstmes').value = fmes.trim();
       document.getElementById('card-example').value = data.mes_example || '';
       document.getElementById('card-sysprompt').value = data.system_prompt || '';
       updateCardPreview();
@@ -2031,10 +2036,16 @@ function parseCharacterCard(buffer) {
           keyword = td1.decode(textBytes.slice(0, nullIdx));
           value = td1.decode(textBytes.slice(nullIdx + 1));
         }
+        // Decode value: try direct JSON, fallback to base64
+        function tryDecode(val) {
+          try { return JSON.parse(val); } catch(e) {}
+          try { return JSON.parse(atob(val)); } catch(e) {}
+          return null;
+        }
         if (keyword === 'chara') {
-          try { charaJSON = JSON.parse(value); } catch(e) {}
+          charaJSON = tryDecode(value);
         } else if (keyword === 'ccv3') {
-          try { ccv3JSON = JSON.parse(atob(value)); } catch(e) {}
+          ccv3JSON = tryDecode(value);
         }
       }
     }
@@ -2042,7 +2053,12 @@ function parseCharacterCard(buffer) {
     offset = dataStart + length + 4; // skip CRC
   }
   
-  return ccv3JSON || charaJSON;
+  const result = ccv3JSON || charaJSON;
+  // Prefer data field for V2/V3 cards
+  if (result && result.data) {
+    return result.data;
+  }
+  return result;
 }
 
 // Generate a PNG character card from fields + avatar image buffer
