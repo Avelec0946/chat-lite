@@ -1135,13 +1135,27 @@ function navigateToSearchResult(dir) {
   const info = document.getElementById('branch-search-info');
   if (info) info.textContent = `${branchSearchIdx + 1}/${branchSearchResults.length}`;
   // Find and scroll to the node in SVG
+  const container = document.querySelector('.branch-drawer-body');
   const svg = document.querySelector('.branch-svg');
-  if (!svg) return;
+  if (!container || !svg) return;
   const nodes = svg.querySelectorAll('.tree-node');
   for (const g of nodes) {
     const onclick = g.getAttribute('onclick') || '';
     if (onclick.includes(result.id)) {
-      g.scrollIntoView({ block: 'center' });
+      // Scroll the container to make this node visible
+      const transform = g.getAttribute('transform') || '';
+      const match = transform.match(/translate\(([^,]+),\s*([^)]+)\)/);
+      if (match) {
+        const tx = parseFloat(match[1]), ty = parseFloat(match[2]);
+        container.scrollTop = Math.max(0, ty * branchZoom - container.clientHeight / 2);
+        container.scrollLeft = Math.max(0, tx * branchZoom - container.clientWidth / 2);
+      }
+      // Flash highlight
+      g.style.outline = '3px solid #f59e0b';
+      g.style.outlineOffset = '2px';
+      g.style.zIndex = '10';
+      setTimeout(() => { g.style.outline = ''; g.style.outlineOffset = ''; g.style.zIndex = ''; }, 1500);
+      break;
     }
   }
 }
