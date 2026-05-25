@@ -1061,8 +1061,39 @@ function doBranchSearch() {
   if (info) info.textContent = branchSearchResults.length > 0 
     ? `${branchSearchResults.length} 条` : '无结果';
   updateSearchHighlights();
+  renderSearchResults();
   if (branchSearchIdx >= 0) navigateToSearchResult(0);
 }
+
+function renderSearchResults() {
+  const container = document.getElementById('branch-search-results');
+  if (!container) return;
+  if (branchSearchResults.length === 0) {
+    container.style.display = 'none';
+    container.innerHTML = '';
+    return;
+  }
+  container.style.display = 'block';
+  const query = (document.getElementById('branch-search-input')?.value || '').trim();
+  container.innerHTML = branchSearchResults.map((r, i) => {
+    const conv = currentConv();
+    const msg = conv?.messageMap?.[r.id];
+    const role = msg?.role === 'user' ? '👤' : '🤖';
+    const text = escapeHtml(r.text);
+    const hl = text.replace(new RegExp(escapeRegex(query), 'gi'), m => `<mark class="result-highlight">${m}</mark>`);
+    return `<div class="branch-search-result" data-idx="${i}" onclick="jumpToSearchResult(${i})">
+      <span class="result-role">${role}</span>
+      <span class="result-text">${hl}</span>
+    </div>`;
+  }).join('');
+}
+
+function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+window.jumpToSearchResult = function(idx) {
+  branchSearchIdx = idx;
+  navigateToSearchResult(0);
+};
 
 function updateSearchHighlights() {
   const svg = document.querySelector('.branch-svg');

@@ -54,6 +54,16 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .zoom-label{font-size:12px;color:var(--text2)}
 .zoom-input{width:40px;text-align:center;font-size:12px;padding:2px 0;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);margin:0 4px}
 .branch-svg{transition:transform .2s}
+.branch-search-row{display:flex;align-items:center;gap:4px;padding:8px 0;border-bottom:1px solid var(--border);margin-bottom:8px}
+.branch-search-input-wide{flex:1;padding:6px 10px;font-size:12px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);outline:none}
+.branch-search-input-wide:focus{border-color:var(--primary)}
+.branch-search-results{max-height:150px;overflow-y:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg3)}
+.branch-search-result{padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:6px}
+.branch-search-result:last-child{border-bottom:0}
+.branch-search-result:hover{background:var(--bg2)}
+.branch-search-result .result-role{flex-shrink:0;width:20px;text-align:center}
+.branch-search-result .result-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.branch-search-result .result-highlight{background:#f59e0b33;color:#f59e0b;font-weight:bold;border-radius:2px;padding:0 2px}
 .branch-info{padding:8px 0 12px;color:var(--text2);font-size:12px;border-bottom:1px solid var(--border);margin-bottom:8px}
 /* Version arrows */
 .version-arrows{display:inline-flex;align-items:center;gap:2px;margin-left:8px;vertical-align:middle}
