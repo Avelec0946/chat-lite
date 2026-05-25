@@ -265,6 +265,7 @@ async function init() {
     }
   });
   btnNew.addEventListener('click', newChat);
+  $('conv-search-input').addEventListener('input', renderSidebar);
   $('btn-settings').addEventListener('click', () => toggleSettings(true));
   $('btn-close-settings').addEventListener('click', () => toggleSettings(false));
   $('btn-branch').addEventListener('click', () => { openBranchDrawer(); setTimeout(applyBranchCenter, 200); });
@@ -326,7 +327,11 @@ function restoreConversationState() {
 
 // ===== Sidebar =====
 function renderSidebar() {
-  convList.innerHTML = state.conversations.map(c =>
+  const query = (document.getElementById('conv-search-input')?.value || '').trim().toLowerCase();
+  const filtered = query 
+    ? state.conversations.filter(c => c.title.toLowerCase().includes(query))
+    : state.conversations;
+  convList.innerHTML = filtered.map(c =>
     `<div class="conv-item${c.id === state.currentId ? ' active' : ''}" data-id="${c.id}">
       <span class="conv-title">${escapeHtml(c.title)}</span>
       <button class="del-btn" data-id="${c.id}" title="删除">🗑</button>
