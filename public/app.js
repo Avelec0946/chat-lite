@@ -270,6 +270,10 @@ async function init() {
   $('btn-close-settings').addEventListener('click', () => toggleSettings(false));
   $('btn-branch').addEventListener('click', () => { openBranchDrawer(); setTimeout(applyBranchCenter, 200); });
   $('btn-close-branch').addEventListener('click', closeBranchDrawer);
+  // Branch search
+  $('branch-search-input').addEventListener('input', doBranchSearch);
+  $('btn-search-prev').addEventListener('click', () => navigateToSearchResult(-1));
+  $('btn-search-next').addEventListener('click', () => navigateToSearchResult(1));
   $('btn-zoom-in').addEventListener('click', () => { branchZoom = branchZoom + 0.08; applyBranchZoom(); updateZoomInput(); });
   $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.1); applyBranchZoom(); updateZoomInput(); });
   $('zoom-input').addEventListener('change', () => {
@@ -1021,6 +1025,94 @@ let branchZoom = 1;
 function closeBranchDrawer() {
   document.getElementById('branch-drawer').style.display = 'none';
   removePinchListeners();
+  branchSearchResults = [];
+  branchSearchIdx = -1;
+  document.getElementById('branch-search-input').value = '';
+  document.getElementById('branch-search-info').textContent = '';
+}
+
+// ===== Branch search =====
+let branchSearchResults = [];
+let branchSearchIdx = -1;
+
+function doBranchSearch() {
+  const input = document.getElementById('branch-search-input');
+  const query = (input?.value || '').trim().toLowerCase();
+  const info = document.getElementById('branch-search-info');
+  const conv = currentConv();
+  if (!query || !conv) {
+    branchSearchResults = []; branchSearchIdx = -1;
+    clearSearchHighlights();
+    if (info) info.textContent = '';
+    return;
+  }
+  // Search all messages in the conversation
+  branchSearchResults = [];
+  for (const [id, msg] of Object.entries(conv.messageMap || {})) {
+    if (msg.role === 'system') continue;
+    const content = (msg.content || '').toLowerCase();
+    const title = (msg.title || '').toLowerCase();
+    const idx = content.indexOf(query);
+    if (idx >= 0) {
+      branchSearchResults.push({ id, pos: idx, text: content.substring(Math.max(0,idx-20), idx+query.length+40) });
+    }
+  }
+  branchSearchIdx = branchSearchResults.length > 0 ? 0 : -1;
+  if (info) info.textContent = branchSearchResults.length > 0 
+    ? `${branchSearchResults.length} 条` : '无结果';
+  updateSearchHighlights();
+  if (branchSearchIdx >= 0) navigateToSearchResult(0);
+}
+
+function updateSearchHighlights() {
+  const svg = document.querySelector('.branch-svg');
+  if (!svg) return;
+  // Clear old highlights
+  svg.querySelectorAll('.search-highlight').forEach(el => el.remove());
+  // Add new highlights
+  const resultIds = new Set(branchSearchResults.map(r => r.id));
+  svg.querySelectorAll('.tree-node').forEach(g => {
+    const onclick = g.getAttribute('onclick') || '';
+    const idMatch = onclick.match(/'([^']+)'/);
+    if (idMatch && resultIds.has(idMatch[1])) {
+      const rect = g.querySelector('rect');
+      if (rect) {
+        const hl = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        hl.setAttribute('x', rect.getAttribute('x'));
+        hl.setAttribute('y', rect.getAttribute('y'));
+        hl.setAttribute('width', rect.getAttribute('width'));
+        hl.setAttribute('height', rect.getAttribute('height'));
+        hl.setAttribute('rx', '8');
+        hl.setAttribute('fill', 'none');
+        hl.setAttribute('stroke', '#f59e0b');
+        hl.setAttribute('stroke-width', '3');
+        hl.classList.add('search-highlight');
+        g.appendChild(hl);
+      }
+    }
+  });
+}
+
+function clearSearchHighlights() {
+  document.querySelectorAll('.search-highlight').forEach(el => el.remove());
+}
+
+function navigateToSearchResult(dir) {
+  if (branchSearchResults.length === 0) return;
+  branchSearchIdx = (branchSearchIdx + dir + branchSearchResults.length) % branchSearchResults.length;
+  const result = branchSearchResults[branchSearchIdx];
+  const info = document.getElementById('branch-search-info');
+  if (info) info.textContent = `${branchSearchIdx + 1}/${branchSearchResults.length}`;
+  // Find and scroll to the node in SVG
+  const svg = document.querySelector('.branch-svg');
+  if (!svg) return;
+  const nodes = svg.querySelectorAll('.tree-node');
+  for (const g of nodes) {
+    const onclick = g.getAttribute('onclick') || '';
+    if (onclick.includes(result.id)) {
+      g.scrollIntoView({ block: 'center' });
+    }
+  }
 }
 
 // Pinch-zoom for mobile
