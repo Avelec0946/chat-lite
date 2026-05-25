@@ -2020,9 +2020,17 @@ function parseCharacterCard(buffer) {
       let nullIdx = -1;
       for (let i = 0; i < textBytes.length; i++) { if (textBytes[i] === 0) { nullIdx = i; break; } }
       if (nullIdx >= 0) {
-        const td = new TextDecoder('latin1');
-        const keyword = td.decode(textBytes.slice(0, nullIdx));
-        const value = td.decode(textBytes.slice(nullIdx + 1));
+        // Try UTF-8 first, fallback to Latin-1 (PNG spec default for tEXt)
+        let keyword, value;
+        try {
+          const td8 = new TextDecoder('utf-8', {fatal:true});
+          keyword = td8.decode(textBytes.slice(0, nullIdx));
+          value = td8.decode(textBytes.slice(nullIdx + 1));
+        } catch(e) {
+          const td1 = new TextDecoder('latin1');
+          keyword = td1.decode(textBytes.slice(0, nullIdx));
+          value = td1.decode(textBytes.slice(nullIdx + 1));
+        }
         if (keyword === 'chara') {
           try { charaJSON = JSON.parse(value); } catch(e) {}
         } else if (keyword === 'ccv3') {
