@@ -485,6 +485,7 @@ function renderSidebar() {
       input.value = oldTitle;
       input.addEventListener('blur', () => {
         conv.title = input.value.trim() || oldTitle;
+        conv.updatedAt = Date.now();
         save();
         renderSidebar();
       });
