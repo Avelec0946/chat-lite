@@ -27,12 +27,16 @@ function save() {
   } catch(e) {
     console.warn('Failed to save:', e.message);
   }
-  // Sync to server
+  // Sync to server including deleted IDs
   try {
     fetch('/api/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversations: state.conversations, currentId: state.currentId })
+      body: JSON.stringify({
+        conversations: state.conversations,
+        currentId: state.currentId,
+        deletedIds: state.deletedIds || []
+      })
     });
   } catch(e) {}
 }
@@ -192,10 +196,19 @@ const apiKeyInput = $('api-key-input');
 async function init() {
   // Merge server + localStorage data by timestamp (newest wins)
   loadData(); // Load localStorage first as baseline
+  state.deletedIds = state.deletedIds || [];
   try {
     const resp = await fetch('/api/load');
     const data = await resp.json();
     if (data.conversations && data.conversations.length > 0) {
+      // Merge deleted: if server has deletedIds, apply to local
+      const serverDeleted = data.deletedIds || [];
+      serverDeleted.forEach(function(id) {
+        var idx = state.conversations.findIndex(function(c) { return c.id === id; });
+        if (idx >= 0) state.conversations.splice(idx, 1);
+      });
+      if (serverDeleted.length > 0) save();
+      
       // Merge: for each server conversation, keep the newer version
       const localMap = {};
       for (const c of state.conversations) { localMap[c.id] = c; }
@@ -484,6 +497,8 @@ function renderSidebar() {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const id = btn.dataset.id;
+      state.deletedIds = state.deletedIds || [];
+      if (state.deletedIds.indexOf(id) < 0) state.deletedIds.push(id);
       if (state.conversations.length <= 1) { newChat(); return; }
       state.conversations = state.conversations.filter(c => c.id !== id);
       if (state.currentId === id) {
@@ -1048,9 +1063,7 @@ async function sendFromMessage(context) {
   } finally {
     state.loading = false;
     updateSendButton();
-    // Remove cursor blink
-    const bubbles = messagesEl.querySelectorAll('.cursor-blink');
-    bubbles.forEach(el => el.classList.remove('cursor-blink'));
+    renderMessages();
     scrollToBottom();
   }
 }
