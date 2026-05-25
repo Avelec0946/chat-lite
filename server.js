@@ -127,10 +127,10 @@ if (!fs.existsSync(DATA_DIR)) {
 
 app.post('/api/save', (req, res) => {
   try {
-    const { conversations, currentId, key } = req.body;
+    const { conversations, currentId, key, deletedIds } = req.body;
     const fileKey = (key || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
     const filePath = path.join(DATA_DIR, `conversations_${fileKey}.json`);
-    fs.writeFileSync(filePath, JSON.stringify({ conversations, currentId, savedAt: Date.now() }, null, 2));
+    fs.writeFileSync(filePath, JSON.stringify({ conversations, currentId, deletedIds, savedAt: Date.now() }, null, 2));
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -145,7 +145,7 @@ app.get('/api/load', (req, res) => {
       return res.json({ conversations: [], currentId: null });
     }
     const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    res.json({ conversations: data.conversations || [], currentId: data.currentId || null });
+    res.json({ conversations: data.conversations || [], currentId: data.currentId || null, deletedIds: data.deletedIds || [] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
