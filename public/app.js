@@ -903,7 +903,7 @@ async function sendMessage() {
     wordCount: countWords(text),
     versions: [{ content: text, timestamp: Date.now(), reason: 'original' }],
     activeVersion: 0,
-    files: files.map(f => ({ name: f.name, type: f.type, content: f.content.slice(0, 5000), size: f.size })),
+    files: files.map(f => ({ name: f.name, type: f.type, content: f.content.slice(0, 500000), size: f.size })),
     createdAt: Date.now()
   };
 
