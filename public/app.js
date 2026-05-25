@@ -252,7 +252,7 @@ async function init() {
   $('btn-branch').addEventListener('click', () => { openBranchDrawer(); setTimeout(applyBranchCenter, 200); });
   $('btn-close-branch').addEventListener('click', closeBranchDrawer);
   $('btn-zoom-in').addEventListener('click', () => { branchZoom = branchZoom + 0.08; applyBranchZoom(); updateZoomInput(); });
-  $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.3); applyBranchZoom(); updateZoomInput(); });
+  $('btn-zoom-out').addEventListener('click', () => { branchZoom = Math.max(branchZoom - 0.08, 0.1); applyBranchZoom(); updateZoomInput(); });
   $('zoom-input').addEventListener('change', () => {
     const v = parseInt($('zoom-input').value) / 100;
     if (v > 0) { branchZoom = v; applyBranchZoom(); }
@@ -1034,7 +1034,7 @@ function onWheelZoom(e) {
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
   const svgX = (container.scrollLeft + mx) / branchZoom;
   const svgY = (container.scrollTop + my) / branchZoom;
-  branchZoom = Math.max(0.3, Math.min(branchZoom + delta, 50));
+  branchZoom = Math.max(0.1, Math.min(branchZoom + delta, 50));
   applyBranchZoom();
   updateZoomInput();
   container.scrollLeft = svgX * branchZoom - mx;
@@ -1079,7 +1079,7 @@ function onPinchMove(e) {
   // Dead zone: skip if fingers barely moved (< 2px change)
   if (Math.abs(newDist - pinchState.dist) < 2) return;
   const scale = newDist / pinchState.dist;
-  const newZoom = Math.max(0.3, Math.min(pinchState.startZoom * scale, 50));
+  const newZoom = Math.max(0.1, Math.min(pinchState.startZoom * scale, 50));
   
   // Use the CURRENT pinch midpoint, not the initial one
   const curMidX = (t1.clientX + t2.clientX) / 2;
