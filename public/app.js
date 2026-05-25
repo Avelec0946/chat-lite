@@ -823,7 +823,6 @@ function saveEdit(msgId, newContent) {
     // Save old content as a version in the original message
     msg.versions.push({ content: msg.content, timestamp: Date.now(), reason: 'edited' });
     msg.activeVersion = 0;
-    msg.content = newContent;
     
     // Create a NEW node as sibling for the edited content
     var newId = uid();
@@ -846,12 +845,11 @@ function saveEdit(msgId, newContent) {
     var parent = getMsg(conv, msg.parentId);
     if (parent) parent.children.push(newId);
     
-    // Update activePath: replace old msgId with newId
+    // Update activePath: replace old msgId with newId, truncate after
     var mIdx = conv.activePath.indexOf(msgId);
     if (mIdx >= 0) {
       conv.activePath[mIdx] = newId;
-      // If there were any children after this node, they stay with the OLD msg
-      // (we don't move them - old msg keeps its AI responses for context)
+      conv.activePath = conv.activePath.slice(0, mIdx + 1);
     }
     
     msg.editing = false;
