@@ -818,52 +818,49 @@ function saveEdit(msgId, newContent) {
     return;
   }
 
-  // User message - save old version and create a new sibling node
+  // User message - save old as version, create new branch, trigger AI regen
   if (newContent !== msg.content) {
-    // Save old content to versions
+    // Save old content as a version in the original message
     msg.versions.push({ content: msg.content, timestamp: Date.now(), reason: 'edited' });
     msg.activeVersion = 0;
+    msg.content = newContent;
     
-    // Create a new user message node as sibling
-    const newUserMsg = {
-      id: uid(),
+    // Create a NEW node as sibling for the edited content
+    var newId = uid();
+    var newMsg = {
+      id: newId,
       role: 'user',
       content: newContent,
       parentId: msg.parentId,
       children: [],
       title: newContent.substring(0, 30) + (newContent.length > 30 ? '...' : ''),
       wordCount: countWords(newContent),
-      versions: [{ content: newContent, timestamp: Date.now(), reason: 'original' }],
+      versions: [{ content: newContent, timestamp: Date.now(), reason: 'edited' }],
       activeVersion: 0,
       files: msg.files || [],
       createdAt: Date.now()
     };
-    conv.messageMap[newUserMsg.id] = newUserMsg;
+    conv.messageMap[newId] = newMsg;
     
-    // Wire up siblings
-    msg.children.forEach(function(cId) {
-      var child = getMsg(conv, cId);
-      if (child) { child.parentId = newUserMsg.id; newUserMsg.children.push(cId); }
-    });
-    msg.children = [];
-    
-    // Insert as sibling
+    // The NEW message is a child of the same parent
     var parent = getMsg(conv, msg.parentId);
-    if (parent) {
-      var siblingIdx = parent.children.indexOf(msgId);
-      if (siblingIdx >= 0) parent.children.splice(siblingIdx + 1, 0, newUserMsg.id);
-      else parent.children.push(newUserMsg.id);
+    if (parent) parent.children.push(newId);
+    
+    // Update activePath: replace old msgId with newId
+    var mIdx = conv.activePath.indexOf(msgId);
+    if (mIdx >= 0) {
+      conv.activePath[mIdx] = newId;
+      // If there were any children after this node, they stay with the OLD msg
+      // (we don't move them - old msg keeps its AI responses for context)
     }
     
-    // Update active path: replace msgId with newUserMsg.id
-    var msgIdx = conv.activePath.indexOf(msgId);
-    if (msgIdx >= 0) conv.activePath[msgIdx] = newUserMsg.id;
-    
-  } else {
-    // Content unchanged, just exit edit mode
     msg.editing = false;
     save();
     renderMessages();
+    
+    // Trigger AI regeneration for the new message (since it has no response)
+    var ctx = buildContext(conv);
+    setTimeout(function() { sendFromMessage(ctx); }, 100);
     return;
   }
 
