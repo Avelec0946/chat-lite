@@ -349,6 +349,17 @@ function restoreConversationState() {
       document.getElementById('card-example').value = data.mes_example || '';
       document.getElementById('card-sysprompt').value = data.system_prompt || '';
       updateCardPreview();
+      // Auto-fill system prompt
+      var prompt = buildCardPrompt({
+        name: document.getElementById('card-name').value,
+        description: document.getElementById('card-desc').value,
+        personality: document.getElementById('card-personality').value,
+        scenario: document.getElementById('card-scenario').value,
+        first_mes: document.getElementById('card-firstmes').value,
+        mes_example: document.getElementById('card-example').value,
+        system_prompt: document.getElementById('card-sysprompt').value
+      });
+      document.getElementById('system-prompt').value = prompt;
     } catch(err) { alert('导入失败: ' + err.message); }
     e.target.value = '';
   });
@@ -2009,8 +2020,9 @@ function parseCharacterCard(buffer) {
       let nullIdx = -1;
       for (let i = 0; i < textBytes.length; i++) { if (textBytes[i] === 0) { nullIdx = i; break; } }
       if (nullIdx >= 0) {
-        const keyword = String.fromCharCode(...textBytes.slice(0, nullIdx));
-        const value = String.fromCharCode(...textBytes.slice(nullIdx + 1));
+        const td = new TextDecoder('latin1');
+        const keyword = td.decode(textBytes.slice(0, nullIdx));
+        const value = td.decode(textBytes.slice(nullIdx + 1));
         if (keyword === 'chara') {
           try { charaJSON = JSON.parse(value); } catch(e) {}
         } else if (keyword === 'ccv3') {
