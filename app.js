@@ -1166,6 +1166,10 @@ async function sendFromMessage(context) {
     thinkingEnabled: conv.thinkingEnabled !== false
   };
   if (!useDirect) reqBody.apiKey = apiKey || undefined;
+  // Direct mode: apply thinking toggle (server usually does this)
+  if (useDirect && conv.thinkingEnabled === false) {
+    reqBody.thinking = { type: 'disabled' };
+  }
   
   const resp = await fetch(apiUrl, {
     method: 'POST',
