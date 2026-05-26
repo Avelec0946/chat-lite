@@ -201,7 +201,7 @@ async function init() {
     const resp = await fetch('/api/load');
     const data = await resp.json();
     if (data.conversations && data.conversations.length > 0) {
-      // Merge deleted: if server has deletedIds, apply to local
+      // Apply server-side deletes
       const serverDeleted = data.deletedIds || [];
       serverDeleted.forEach(function(id) {
         var idx = state.conversations.findIndex(function(c) { return c.id === id; });
@@ -209,28 +209,68 @@ async function init() {
       });
       if (serverDeleted.length > 0) save();
       
-      // Merge: for each server conversation, keep the newer version
-      const localMap = {};
-      for (const c of state.conversations) { localMap[c.id] = c; }
-      for (const sc of data.conversations) {
-        const lc = localMap[sc.id];
-        if (!lc) {
-          // Server has a conversation that's not local — add it
-          state.conversations.push(sc);
-        } else if ((sc.updatedAt || 0) > (lc.updatedAt || 0)) {
-          // Server has newer version — replace local
-          const idx = state.conversations.findIndex(c => c.id === sc.id);
-          if (idx >= 0) state.conversations[idx] = sc;
+      // Detect conflicts and group changes
+      var localMap = {};
+      for (var i = 0; i < state.conversations.length; i++) localMap[state.conversations[i].id] = state.conversations[i];
+      var conflicts = [], toAdd = [], toReplace = [];
+      var now = Date.now();
+      for (var j = 0; j < data.conversations.length; j++) {
+        var sc = data.conversations[j];
+        var lc = localMap[sc.id];
+        if (!lc) { toAdd.push(sc); continue; }
+        var lTime = lc.updatedAt || 0, sTime = sc.updatedAt || 0;
+        // Conflict: both modified since server last wrote (savedAt)
+        if (lTime > sTime && sTime > 0) {
+          conflicts.push({ id: sc.id, local: lc, server: sc });
+        } else if (sTime > lTime) {
+          toReplace.push(sc);
         }
-        // else: local is newer, keep it
+        // equal: no change needed
       }
-      // If server has a currentId we don't have, use it
-      if (data.currentId && !state.conversations.find(c => c.id === data.currentId)) {
-        state.currentId = data.currentId;
+      
+      if (conflicts.length > 0) {
+        var resolution = await showConflictDialog(conflicts);
+        if (resolution === 'local') {
+          toAdd.forEach(function(c) { state.conversations.push(c); });
+          toReplace.forEach(function(sc) {
+            var idx = state.conversations.findIndex(function(c) { return c.id === sc.id; });
+            if (idx >= 0) state.conversations[idx] = sc;
+          });
+          if (data.currentId && !state.conversations.find(function(c) { return c.id === data.currentId; })) {
+            state.currentId = data.currentId;
+          }
+          save();
+        } else if (resolution === 'server') {
+          toAdd.forEach(function(c) { state.conversations.push(c); });
+          toReplace.forEach(function(sc) {
+            var idx = state.conversations.findIndex(function(c) { return c.id === sc.id; });
+            if (idx >= 0) state.conversations[idx] = sc;
+          });
+          conflicts.forEach(function(cf) {
+            var idx = state.conversations.findIndex(function(c) { return c.id === cf.id; });
+            if (idx >= 0) state.conversations[idx] = cf.server;
+          });
+          if (data.currentId && !state.conversations.find(function(c) { return c.id === data.currentId; })) {
+            state.currentId = data.currentId;
+          }
+          save();
+        }
+        // Cancel keeps current state
+      } else {
+        // No conflicts, silent merge
+        toAdd.forEach(function(c) { state.conversations.push(c); });
+        toReplace.forEach(function(sc) {
+          var idx = state.conversations.findIndex(function(c) { return c.id === sc.id; });
+          if (idx >= 0) state.conversations[idx] = sc;
+        });
+        if (data.currentId && !state.conversations.find(function(c) { return c.id === data.currentId; })) {
+          state.currentId = data.currentId;
+        }
+        save();
       }
     }
   } catch(e) {
-    // Server not available — localStorage baseline is already loaded
+    console.log('Server not available:', e.message);
   }
   // Migrate any old-format conversations
   for (const conv of state.conversations) {
@@ -446,6 +486,58 @@ function updateCardPreview() {
   var p = buildCardPrompt(f);
   document.getElementById('card-preview').textContent = p || '(预览系统提示词)';
   return p;
+}
+
+
+
+// ===== Conflict resolution =====
+function showConflictDialog(conflicts) {
+  return new Promise(function(resolve) {
+    var overlay = document.getElementById('conflict-dialog');
+    var msg = document.getElementById('conflict-msg');
+    var summary = document.getElementById('conflict-summary');
+    
+    // Build summary of conflicts
+    var items = conflicts.map(function(cf) {
+      var localTime = new Date(cf.local.updatedAt || 0).toLocaleTimeString();
+      var serverTime = new Date(cf.server.updatedAt || 0).toLocaleTimeString();
+      var localPreview = (cf.local.title || '无标题').substring(0, 40);
+      var serverPreview = (cf.server.title || '无标题').substring(0, 40);
+      return '<div class="conflict-item">' +
+        '<div class="diff-head">' + localPreview + '</div>' +
+        '<div class="diff-preview">本地修改: ' + localTime + '</div>' +
+        '<div class="diff-preview">服务端修改: ' + serverTime + '</div>' +
+        '</div>';
+    }).join('');
+    
+    msg.textContent = '发现 ' + conflicts.length + ' 个对话在两边都有修改，请选择保留哪一方的数据：';
+    summary.innerHTML = items;
+    overlay.style.display = 'flex';
+    
+    function finish(choice) {
+      overlay.style.display = 'none';
+      // Clean up listeners
+      var localBtn = document.getElementById('btn-conflict-local');
+      var serverBtn = document.getElementById('btn-conflict-server');
+      var cancelBtn = document.getElementById('btn-conflict-cancel');
+      localBtn.replaceWith(localBtn.cloneNode(true));
+      serverBtn.replaceWith(serverBtn.cloneNode(true));
+      cancelBtn.replaceWith(cancelBtn.cloneNode(true));
+      resolve(choice);
+    }
+    
+    document.getElementById('btn-conflict-local').addEventListener('click', function() {
+      finish('local');
+    }, {once: true});
+    
+    document.getElementById('btn-conflict-server').addEventListener('click', function() {
+      finish('server');
+    }, {once: true});
+    
+    document.getElementById('btn-conflict-cancel').addEventListener('click', function() {
+      finish('cancel');
+    }, {once: true});
+  });
 }
 
 
