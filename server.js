@@ -1,6 +1,8 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+const http = require('http');
 
 const app = express();
 
@@ -152,7 +154,31 @@ app.get('/api/load', (req, res) => {
 });
 
 const PORT = config.port || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`chat-lite running at http://localhost:${PORT}`);
-  console.log(`Tailscale: http://<tailscale-ip>:${PORT}`);
+const HTTPS_PORT = PORT + 1;  // e.g. 7001 for HTTPS
+
+// HTTP server (keep for backwards compat)
+const httpServer = http.createServer(app);
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`HTTP  at http://localhost:${PORT}`);
 });
+
+// HTTPS server (for PWA install support)
+try {
+  const certPath = path.join(__dirname, 'certs', 'cert.pem');
+  const keyPath = path.join(__dirname, 'certs', 'key.pem');
+  if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+    const httpsOpts = {
+      cert: fs.readFileSync(certPath),
+      key: fs.readFileSync(keyPath)
+    };
+    const httpsServer = https.createServer(httpsOpts, app);
+    httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
+      console.log(`HTTPS at https://localhost:${HTTPS_PORT}`);
+      console.log(`PWA ready: https://<ip>:${HTTPS_PORT}`);
+    });
+  } else {
+    console.log('No SSL certs found, HTTPS not available');
+  }
+} catch(e) {
+  console.log('HTTPS start failed:', e.message);
+}
