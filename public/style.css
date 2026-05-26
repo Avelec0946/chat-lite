@@ -1,5 +1,7 @@
 /* ===== Reset & Base ===== */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+.install-banner{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--bg);border:1px solid var(--primary);border-radius:12px;padding:12px 20px;display:flex;align-items:center;gap:12px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,.3);font-size:14px}
 :root{
   --bg:#f0f2f5;--bg2:#fff;--bg3:#f7f8fa;--text:#1a1a2e;--text2:#6b7280;--border:#e5e7eb;
   --primary:#2563eb;--primary-hover:#1d4ed8;--shadow:0 1px 3px rgba(0,0,0,.08);--radius:8px;

@@ -310,6 +310,28 @@ async function init() {
   renderSidebar();
   renderMessages();
 
+  // PWA install prompt handler
+  var deferredPrompt;
+  window.addEventListener('beforeinstallprompt', function(e) {
+    e.preventDefault();
+    deferredPrompt = e;
+    var banner = document.createElement('div');
+    banner.id = 'install-banner';
+    banner.className = 'install-banner';
+    banner.innerHTML = '<span>安装为应用</span><button id="btn-install-now" class="btn btn-small">安装</button><button id="btn-install-dismiss" class="btn btn-small" style="background:var(--bg3);color:var(--text)">✕</button>';
+    document.body.appendChild(banner);
+    document.getElementById('btn-install-now').addEventListener('click', function() {
+      if (deferredPrompt) { deferredPrompt.prompt(); deferredPrompt = null; }
+      banner.remove();
+    });
+    document.getElementById('btn-install-dismiss').addEventListener('click', function() { banner.remove(); });
+  });
+  window.addEventListener('appinstalled', function() {
+    deferredPrompt = null;
+    var b = document.getElementById('install-banner');
+    if (b) b.remove();
+  });
+
   // Event listeners
   btnSend.addEventListener('click', sendMessage);
   var btnStop = document.getElementById('btn-stop');
