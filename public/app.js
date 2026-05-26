@@ -102,10 +102,11 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return JSON.parse(raw);
   } catch(e) {}
-  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6' };
+  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false };
 }
 
 function saveSettings() {
+  settings.directMode = document.getElementById('direct-mode-check')?.checked || false;
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
@@ -1122,18 +1123,31 @@ async function sendFromMessage(context) {
   }
 
   try {
-    const resp = await fetch('/api/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: context,
-        model: conv.model || modelSelect.value,
-        stream: true,
-        thinkingEnabled: conv.thinkingEnabled !== false,
-        apiKey: settings.apiKey || undefined
-      }),
-      signal: state.abortController?.signal
-    });
+    var apiUrl = settings.directMode
+    ? 'https://api.deepseek.com/v1/chat/completions'
+    : '/api/chat/completions';
+  var apiKey = settings.apiKey || settings.directKey || '';
+  if (settings.directMode && !apiKey) {
+    assistantMsg.content = '**错误：** 直连模式需要设置 API 密钥';
+    save(); renderMessages(); state.loading = false;
+    toggleSendStop(); scrollToBottom(); return;
+  }
+  var reqHeaders = { 'Content-Type': 'application/json' };
+  if (settings.directMode) reqHeaders['Authorization'] = 'Bearer ' + apiKey;
+  var reqBody = {
+    messages: context,
+    model: conv.model || modelSelect.value,
+    stream: true,
+    thinkingEnabled: conv.thinkingEnabled !== false
+  };
+  if (!settings.directMode) reqBody.apiKey = apiKey || undefined;
+  
+  const resp = await fetch(apiUrl, {
+    method: 'POST',
+    headers: reqHeaders,
+    body: JSON.stringify(reqBody),
+    signal: state.abortController?.signal
+  });
 
     if (!resp.ok) {
       const err = await resp.json();
