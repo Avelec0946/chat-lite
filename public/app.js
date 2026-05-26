@@ -1167,8 +1167,12 @@ async function sendFromMessage(context) {
   };
   if (!useDirect) reqBody.apiKey = apiKey || undefined;
   // Direct mode: apply thinking toggle (server usually does this)
-  if (useDirect && conv.thinkingEnabled === false) {
-    reqBody.thinking = { type: 'disabled' };
+  var shouldDisableThinking = conv.thinkingEnabled === false;
+  if (useDirect) {
+    if (shouldDisableThinking) {
+      reqBody.thinking = { type: 'disabled' };
+    }
+    delete reqBody.thinkingEnabled;
   }
   
   const resp = await fetch(apiUrl, {
