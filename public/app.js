@@ -1145,24 +1145,27 @@ async function sendFromMessage(context) {
   }
 
   try {
-    var apiUrl = settings.directMode
+    // Auto-detect: if NOT on localhost/127.0.0.1, use direct mode
+  var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
+  var useDirect = settings.directMode || !isLocal;
+  var apiUrl = useDirect
     ? 'https://api.deepseek.com/v1/chat/completions'
     : '/api/chat/completions';
   var apiKey = settings.apiKey || settings.directKey || '';
-  if (settings.directMode && !apiKey) {
+  if (useDirect && !apiKey) {
     assistantMsg.content = '**错误：** 直连模式需要设置 API 密钥';
     save(); renderMessages(); state.loading = false;
     toggleSendStop(); scrollToBottom(); return;
   }
   var reqHeaders = { 'Content-Type': 'application/json' };
-  if (settings.directMode) reqHeaders['Authorization'] = 'Bearer ' + apiKey;
+  if (useDirect) reqHeaders['Authorization'] = 'Bearer ' + apiKey;
   var reqBody = {
     messages: context,
     model: conv.model || modelSelect.value,
     stream: true,
     thinkingEnabled: conv.thinkingEnabled !== false
   };
-  if (!settings.directMode) reqBody.apiKey = apiKey || undefined;
+  if (!useDirect) reqBody.apiKey = apiKey || undefined;
   
   const resp = await fetch(apiUrl, {
     method: 'POST',
