@@ -1013,7 +1013,6 @@ async function regenerate(msgId) {
     conv.activePath = conv.activePath.slice(0, idx);
   }
 
-  msg.content = '';
   save();
   renderMessages();
 
