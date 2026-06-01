@@ -18,8 +18,7 @@ try {
 
 // Large body for 1M context
 app.use(express.json({ limit: '50mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.static(path.join(__dirname)));  // also serve root for GitHub Pages
+app.use(express.static(path.join(__dirname)));
 
 // CORS for local dev
 app.use((req, res, next) => {
