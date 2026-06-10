@@ -144,6 +144,75 @@ function getLastActiveMsg(conv) {
   return chain[chain.length - 1] || null;
 }
 function countWords(text) { return (text || '').length; }
+
+// ===== Background Image =====
+function compressImage(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const maxDim = 1920;
+        let w = img.width, h = img.height;
+        if (w > maxDim || h > maxDim) {
+          if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+          else { w = Math.round(w * maxDim / h); h = maxDim; }
+        }
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function applyBackgroundImage() {
+  const conv = currentConv();
+  const bgEl = document.getElementById('chat-bg');
+  if (!bgEl) return;
+  if (conv && conv.backgroundImage) {
+    bgEl.style.backgroundImage = 'url(' + conv.backgroundImage + ')';
+    bgEl.classList.add('active');
+  } else {
+    bgEl.style.backgroundImage = '';
+    bgEl.classList.remove('active');
+  }
+}
+
+async function setBackgroundImage(file) {
+  const dataUrl = await compressImage(file);
+  const conv = currentConv();
+  if (!conv) return;
+  conv.backgroundImage = dataUrl;
+  conv.updatedAt = Date.now();
+  save();
+  applyBackgroundImage();
+  hideBgMenu();
+}
+
+function removeBackgroundImage() {
+  const conv = currentConv();
+  if (!conv) return;
+  delete conv.backgroundImage;
+  conv.updatedAt = Date.now();
+  save();
+  applyBackgroundImage();
+  hideBgMenu();
+}
+
+function showBgMenu() {
+  const menu = document.getElementById('bg-menu');
+  if (menu) menu.style.display = 'block';
+}
+
+function hideBgMenu() {
+  const menu = document.getElementById('bg-menu');
+  if (menu) menu.style.display = 'none';
+}
 function computeBranchWords(conv, fromId) {
   let total = 0, visited = new Set(), stack = [fromId];
   while (stack.length) {
@@ -309,6 +378,7 @@ async function init() {
   restoreConversationState();
   renderSidebar();
   renderMessages();
+  applyBackgroundImage();
 
   // PWA install prompt handler
   var deferredPrompt;
@@ -386,6 +456,31 @@ async function init() {
   modelSelect.addEventListener('change', () => {
     const conv = currentConv();
     if (conv) { conv.model = modelSelect.value; save(); }
+  });
+
+  // Background image
+  $('btn-bg').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const conv = currentConv();
+    if (conv && conv.backgroundImage) {
+      const menu = $('bg-menu');
+      const rect = $('btn-bg').getBoundingClientRect();
+      menu.style.top = (rect.bottom + 4) + 'px';
+      menu.style.left = rect.left + 'px';
+      menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
+    } else {
+      $('bg-file-input').click();
+    }
+  });
+  $('bg-file-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) setBackgroundImage(file);
+    e.target.value = '';
+  });
+  $('bg-change').addEventListener('click', () => $('bg-file-input').click());
+  $('bg-remove').addEventListener('click', removeBackgroundImage);
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#bg-menu') && !e.target.closest('#btn-bg')) hideBgMenu();
   });
 
   // Enable send button on init
@@ -631,6 +726,7 @@ function renderSidebar() {
       save();
       renderSidebar();
       renderMessages();
+      applyBackgroundImage();
       modelSelect.value = currentConv()?.model || 'deepseek-v4-flash';
     });
   });
@@ -642,6 +738,7 @@ function switchConversation(id) {
   save();
   renderSidebar();
   renderMessages();
+  applyBackgroundImage();
   const conv = currentConv();
   if (conv) {
     modelSelect.value = conv.model || 'deepseek-v4-flash';
@@ -658,6 +755,7 @@ function newChat() {
   save();
   renderSidebar();
   renderMessages();
+  applyBackgroundImage();
   modelSelect.value = conv.model;
   chatInput.focus();
 }
