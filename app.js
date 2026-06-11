@@ -513,19 +513,34 @@ async function init() {
         dragCtx.dragStartY = clientY;
         dragCtx.el.classList.remove('long-press');
         dragCtx.el.classList.add('dragging');
+        // Lock list, lift item to fixed position
+        var rect = dragCtx.el.getBoundingClientRect();
+        convList.style.overflow = 'hidden';
+        dragCtx.el.style.position = 'fixed';
+        dragCtx.el.style.left = rect.left + 'px';
+        dragCtx.el.style.top = rect.top + 'px';
+        dragCtx.el.style.width = rect.width + 'px';
         dragCtx.el.style.zIndex = '10';
-        dragCtx.el.style.position = 'relative';
         dragCtx.el.style.transition = 'none';
+        dragCtx.fixedStartTop = rect.top;
         isLongPress = false;
       }
     } else if (dragCtx.mode === 'drag') {
-      dragCtx.el.style.transform = 'translateY(' + (clientY - dragCtx.dragStartY) + 'px)';
+      dragCtx.el.style.top = (dragCtx.fixedStartTop + (clientY - dragCtx.dragStartY)) + 'px';
       // Show drop position
-      const items = [...convList.querySelectorAll('.conv-item:not(.dragging)')];
+      var items = [...convList.querySelectorAll('.conv-item:not(.dragging)')];
       convList.querySelectorAll('.drag-target').forEach(e => e.classList.remove('drag-target'));
-      for (let i = 0; i < items.length; i++) {
-        const rect = items[i].getBoundingClientRect();
-        if (clientY < rect.top + rect.height / 2) { items[i].classList.add('drag-target'); break; }
+      for (var i = 0; i < items.length; i++) {
+        var r = items[i].getBoundingClientRect();
+        if (clientY < r.top + r.height / 2) { items[i].classList.add('drag-target'); break; }
+      }
+      // Auto-scroll near edges
+      var convRect = convList.getBoundingClientRect();
+      var edgeZone = 50;
+      if (clientY < convRect.top + edgeZone) {
+        convList.scrollTop -= 8;
+      } else if (clientY > convRect.bottom - edgeZone) {
+        convList.scrollTop += 8;
       }
     }
   }
@@ -533,22 +548,25 @@ async function init() {
   function endHold() {
     clearTimeout(longPressTimer);
     if (dragCtx && dragCtx.mode === 'drag') {
-      // Calculate drop index
-      const items = [...convList.querySelectorAll('.conv-item:not(.dragging)')];
-      let dropIdx = items.length;
-      for (let i = 0; i < items.length; i++) {
-        const rect = items[i].getBoundingClientRect();
-        const draggedRect = dragCtx.el.getBoundingClientRect();
-        if (draggedRect.top + draggedRect.height / 2 < rect.top + rect.height / 2) { dropIdx = i; break; }
+      // Calculate drop index from visual positions
+      var items = [...convList.querySelectorAll('.conv-item:not(.dragging)')];
+      var dropIdx = items.length;
+      var draggedRect = dragCtx.el.getBoundingClientRect();
+      var draggedMid = draggedRect.top + draggedRect.height / 2;
+      for (var i = 0; i < items.length; i++) {
+        var r = items[i].getBoundingClientRect();
+        if (draggedMid < r.top + r.height / 2) { dropIdx = i; break; }
       }
       // Reset element
       dragCtx.el.classList.remove('dragging');
-      dragCtx.el.style.zIndex = ''; dragCtx.el.style.position = '';
-      dragCtx.el.style.transition = ''; dragCtx.el.style.transform = '';
+      dragCtx.el.style.position = ''; dragCtx.el.style.left = '';
+      dragCtx.el.style.top = ''; dragCtx.el.style.width = '';
+      dragCtx.el.style.zIndex = ''; dragCtx.el.style.transition = '';
+      convList.style.overflow = '';
       convList.querySelectorAll('.drag-target').forEach(e => e.classList.remove('drag-target'));
       // Reorder array
-      const conv = state.conversations.find(c => c.id === dragCtx.id);
-      const fromIdx = state.conversations.indexOf(conv);
+      var conv = state.conversations.find(c => c.id === dragCtx.id);
+      var fromIdx = state.conversations.indexOf(conv);
       if (fromIdx >= 0) { state.conversations.splice(fromIdx, 1); state.conversations.splice(dropIdx, 0, conv); save(); }
       dragCtx = null; isLongPress = false; renderSidebar();
     } else {
