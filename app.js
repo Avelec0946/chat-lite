@@ -9,27 +9,74 @@ const state = {
 
 const STORAGE_KEY = 'chatlite_data';
 const SETTINGS_KEY = 'chatlite_settings';
+
+// ===== IndexedDB (replaces localStorage for large data) =====
+const IDB_NAME = 'chatlite_db';
+const IDB_VER = 1;
+const IDB_STORE = 'data';
+
+function openDB() {
+  return new Promise(function(resolve, reject) {
+    var req = indexedDB.open(IDB_NAME, IDB_VER);
+    req.onupgradeneeded = function(e) {
+      var db = e.target.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = function() { resolve(req.result); };
+    req.onerror = function() { reject(req.error); };
+  });
+}
+
+function idbPut(key, val) {
+  return openDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(val, key);
+      tx.oncomplete = function() { resolve(); };
+      tx.onerror = function() { reject(tx.error); };
+    });
+  });
+}
+
+function idbGet(key) {
+  return openDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction(IDB_STORE, 'readonly');
+      var req = tx.objectStore(IDB_STORE).get(key);
+      req.onsuccess = function() { resolve(req.result); };
+      req.onerror = function() { reject(req.error); };
+    });
+  });
+}
 let settings = loadSettings();
+let isLongPress = false;
 
 // ===== Helpers =====
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 
+function showToast(msg, type) {
+  var t = document.getElementById('app-toast');
+  if (!t) { t = document.createElement('div'); t.id = 'app-toast'; t.className = 'toast'; document.body.appendChild(t); }
+  t.textContent = msg;
+  t.className = 'toast' + (type === 'warn' ? ' warn' : '');
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(function() { t.classList.remove('show'); }, 4000);
+}
+
+var _saveQueue = Promise.resolve();
 function save() {
-  // Stamp current conversation with updatedAt for merge resolution
   const conv = state.conversations.find(c => c.id === state.currentId);
   if (conv) conv.updatedAt = Date.now();
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      conversations: state.conversations,
-      currentId: state.currentId,
-      version: 2
-    }));
-  } catch(e) {
-    console.warn('Failed to save:', e.message);
-  }
-  // Sync to server including deleted IDs
-  try {
-    fetch('/api/save', {
+  // IndexedDB (async, fire-and-forget)
+  var payload = { conversations: state.conversations, currentId: state.currentId, version: 2 };
+  idbPut(STORAGE_KEY, payload).catch(function(e) {
+    console.warn('IndexedDB save failed:', e);
+    showToast('本地存储保存失败', 'warn');
+  });
+  // Sync to server (queued, with retry)
+  _saveQueue = _saveQueue.then(function() {
+    return fetch('/api/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -37,27 +84,84 @@ function save() {
         currentId: state.currentId,
         deletedIds: state.deletedIds || []
       })
+    }).then(function(resp) {
+      if (!resp.ok) throw new Error('Server save failed: ' + resp.status);
+      return resp.json();
+    }).catch(function(err) {
+      console.error('Server save error:', err);
+      showToast('服务端保存失败，请勿刷新页面', 'warn');
+      // Retry once after 2s
+      return new Promise(function(resolve) {
+        setTimeout(function() {
+          fetch('/api/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              conversations: state.conversations,
+              currentId: state.currentId,
+              deletedIds: state.deletedIds || []
+            })
+          }).then(resolve).catch(resolve);
+        }, 2000);
+      });
     });
+  });
+}
+
+async function loadData() {
+  // Try IndexedDB first
+  try {
+    var data = await idbGet(STORAGE_KEY);
+    if (data && data.conversations) {
+      state.conversations = data.conversations || [];
+      state.currentId = data.currentId || null;
+      if (!data.version || data.version < 2) {
+        for (const conv of state.conversations) {
+          if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) migrateV1toV2(conv);
+        }
+      }
+      return;
+    }
+  } catch(e) { console.warn('IndexedDB read failed:', e); }
+  // Fallback: migrate from localStorage
+  try {
+    var raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      var d = JSON.parse(raw);
+      state.conversations = d.conversations || [];
+      state.currentId = d.currentId || null;
+      for (const conv of state.conversations) {
+        if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) migrateV1toV2(conv);
+      }
+      // Migrate to IndexedDB
+      await idbPut(STORAGE_KEY, { conversations: state.conversations, currentId: state.currentId, version: 2 });
+      console.log('Migrated localStorage → IndexedDB');
+    }
   } catch(e) {}
 }
 
-function loadData() {
+async function loadFromServer() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const data = JSON.parse(raw);
-      state.conversations = data.conversations || [];
-      state.currentId = data.currentId || null;
-      // Migrate v1 (array format) to v2 (tree format)
-      if (!data.version || data.version < 2) {
-        for (const conv of state.conversations) {
-          if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) {
-            migrateV1toV2(conv);
-          }
+    const resp = await fetch('/api/load');
+    const data = await resp.json();
+    if (data.conversations && data.conversations.length > 0) {
+      // Server data is primary — replace localStorage baseline entirely
+      state.conversations = data.conversations;
+      state.currentId = data.currentId || state.currentId;
+      state.deletedIds = data.deletedIds || [];
+      // Migrate if needed
+      for (const conv of state.conversations) {
+        if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) {
+          migrateV1toV2(conv);
         }
       }
+      save(); // Persist to IndexedDB + sync to server
+      return true;
     }
-  } catch(e) {}
+  } catch(e) {
+    console.log('Server not available:', e.message);
+  }
+  return false;
 }
 
 function migrateV1toV2(conv) {
@@ -191,7 +295,6 @@ async function setBackgroundImage(file) {
   conv.updatedAt = Date.now();
   save();
   applyBackgroundImage();
-  hideBgMenu();
 }
 
 function removeBackgroundImage() {
@@ -201,18 +304,8 @@ function removeBackgroundImage() {
   conv.updatedAt = Date.now();
   save();
   applyBackgroundImage();
-  hideBgMenu();
 }
 
-function showBgMenu() {
-  const menu = document.getElementById('bg-menu');
-  if (menu) menu.style.display = 'block';
-}
-
-function hideBgMenu() {
-  const menu = document.getElementById('bg-menu');
-  if (menu) menu.style.display = 'none';
-}
 function computeBranchWords(conv, fromId) {
   let total = 0, visited = new Set(), stack = [fromId];
   while (stack.length) {
@@ -264,84 +357,10 @@ const apiKeyInput = $('api-key-input');
 
 // ===== Init =====
 async function init() {
-  // Merge server + localStorage data by timestamp (newest wins)
-  loadData(); // Load localStorage first as baseline
+  await loadData(); // IndexedDB (async)
   state.deletedIds = state.deletedIds || [];
-  try {
-    const resp = await fetch('/api/load');
-    const data = await resp.json();
-    if (data.conversations && data.conversations.length > 0) {
-      // Apply server-side deletes
-      const serverDeleted = data.deletedIds || [];
-      serverDeleted.forEach(function(id) {
-        var idx = state.conversations.findIndex(function(c) { return c.id === id; });
-        if (idx >= 0) state.conversations.splice(idx, 1);
-      });
-      if (serverDeleted.length > 0) save();
-      
-      // Detect conflicts and group changes
-      var localMap = {};
-      for (var i = 0; i < state.conversations.length; i++) localMap[state.conversations[i].id] = state.conversations[i];
-      var conflicts = [], toAdd = [], toReplace = [];
-      var now = Date.now();
-      for (var j = 0; j < data.conversations.length; j++) {
-        var sc = data.conversations[j];
-        var lc = localMap[sc.id];
-        if (!lc) { toAdd.push(sc); continue; }
-        var lTime = lc.updatedAt || 0, sTime = sc.updatedAt || 0;
-        // Conflict: both modified since server last wrote (savedAt)
-        if (lTime > sTime && sTime > 0) {
-          conflicts.push({ id: sc.id, local: lc, server: sc });
-        } else if (sTime > lTime) {
-          toReplace.push(sc);
-        }
-        // equal: no change needed
-      }
-      
-      if (conflicts.length > 0) {
-        var resolution = await showConflictDialog(conflicts);
-        if (resolution === 'local') {
-          toAdd.forEach(function(c) { state.conversations.push(c); });
-          toReplace.forEach(function(sc) {
-            var idx = state.conversations.findIndex(function(c) { return c.id === sc.id; });
-            if (idx >= 0) state.conversations[idx] = sc;
-          });
-          if (data.currentId && !state.conversations.find(function(c) { return c.id === data.currentId; })) {
-            state.currentId = data.currentId;
-          }
-          save();
-        } else if (resolution === 'server') {
-          toAdd.forEach(function(c) { state.conversations.push(c); });
-          toReplace.forEach(function(sc) {
-            var idx = state.conversations.findIndex(function(c) { return c.id === sc.id; });
-            if (idx >= 0) state.conversations[idx] = sc;
-          });
-          conflicts.forEach(function(cf) {
-            var idx = state.conversations.findIndex(function(c) { return c.id === cf.id; });
-            if (idx >= 0) state.conversations[idx] = cf.server;
-          });
-          if (data.currentId && !state.conversations.find(function(c) { return c.id === data.currentId; })) {
-            state.currentId = data.currentId;
-          }
-          save();
-        }
-        // Cancel keeps current state
-      } else {
-        // No conflicts, silent merge
-        toAdd.forEach(function(c) { state.conversations.push(c); });
-        toReplace.forEach(function(sc) {
-          var idx = state.conversations.findIndex(function(c) { return c.id === sc.id; });
-          if (idx >= 0) state.conversations[idx] = sc;
-        });
-        if (data.currentId && !state.conversations.find(function(c) { return c.id === data.currentId; })) {
-          state.currentId = data.currentId;
-        }
-        save();
-      }
-    }
-  } catch(e) {
-    console.log('Server not available:', e.message);
-  }
+  // Server is source of truth — always prefer server data
+  await loadFromServer();
   // Migrate any old-format conversations
   for (const conv of state.conversations) {
     if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) {
@@ -459,28 +478,111 @@ async function init() {
   });
 
   // Background image
-  $('btn-bg').addEventListener('click', (e) => {
-    e.stopPropagation();
-    const conv = currentConv();
-    if (conv && conv.backgroundImage) {
-      const menu = $('bg-menu');
-      const rect = $('btn-bg').getBoundingClientRect();
-      menu.style.top = (rect.bottom + 4) + 'px';
-      menu.style.left = rect.left + 'px';
-      menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
-    } else {
-      $('bg-file-input').click();
-    }
-  });
+  $('btn-set-bg').addEventListener('click', () => $('bg-file-input').click());
   $('bg-file-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) setBackgroundImage(file);
     e.target.value = '';
   });
-  $('bg-change').addEventListener('click', () => $('bg-file-input').click());
-  $('bg-remove').addEventListener('click', removeBackgroundImage);
+  $('btn-remove-bg').addEventListener('click', removeBackgroundImage);
+
+  // Long press + drag to reorder conversations
+  let longPressTimer = null;
+  let dragCtx = null;
+
+  function beginHold(el, clientY) {
+    clearTimeout(longPressTimer);
+    isLongPress = false;
+    const rect = el.getBoundingClientRect();
+    dragCtx = { el, id: el.dataset.id, startY: clientY, startTop: rect.top, height: rect.height, mode: 'wait' };
+    longPressTimer = setTimeout(() => {
+      if (!dragCtx || dragCtx.el !== el) return;
+      isLongPress = true;
+      dragCtx.mode = 'ready';
+      convList.querySelectorAll('.conv-item.long-press').forEach(e => e.classList.remove('long-press'));
+      el.classList.add('long-press');
+    }, 500);
+  }
+
+  function continueHold(clientY) {
+    if (!dragCtx) return;
+    if (dragCtx.mode === 'wait') {
+      if (Math.abs(clientY - dragCtx.startY) > 10) { clearTimeout(longPressTimer); dragCtx = null; }
+    } else if (dragCtx.mode === 'ready') {
+      if (Math.abs(clientY - dragCtx.startY) > 10) {
+        dragCtx.mode = 'drag';
+        dragCtx.dragStartY = clientY;
+        dragCtx.el.classList.remove('long-press');
+        dragCtx.el.classList.add('dragging');
+        dragCtx.el.style.zIndex = '10';
+        dragCtx.el.style.position = 'relative';
+        dragCtx.el.style.transition = 'none';
+        isLongPress = false;
+      }
+    } else if (dragCtx.mode === 'drag') {
+      dragCtx.el.style.transform = 'translateY(' + (clientY - dragCtx.dragStartY) + 'px)';
+      // Show drop position
+      const items = [...convList.querySelectorAll('.conv-item:not(.dragging)')];
+      convList.querySelectorAll('.drag-target').forEach(e => e.classList.remove('drag-target'));
+      for (let i = 0; i < items.length; i++) {
+        const rect = items[i].getBoundingClientRect();
+        if (clientY < rect.top + rect.height / 2) { items[i].classList.add('drag-target'); break; }
+      }
+    }
+  }
+
+  function endHold() {
+    clearTimeout(longPressTimer);
+    if (dragCtx && dragCtx.mode === 'drag') {
+      // Calculate drop index
+      const items = [...convList.querySelectorAll('.conv-item:not(.dragging)')];
+      let dropIdx = items.length;
+      for (let i = 0; i < items.length; i++) {
+        const rect = items[i].getBoundingClientRect();
+        const draggedRect = dragCtx.el.getBoundingClientRect();
+        if (draggedRect.top + draggedRect.height / 2 < rect.top + rect.height / 2) { dropIdx = i; break; }
+      }
+      // Reset element
+      dragCtx.el.classList.remove('dragging');
+      dragCtx.el.style.zIndex = ''; dragCtx.el.style.position = '';
+      dragCtx.el.style.transition = ''; dragCtx.el.style.transform = '';
+      convList.querySelectorAll('.drag-target').forEach(e => e.classList.remove('drag-target'));
+      // Reorder array
+      const conv = state.conversations.find(c => c.id === dragCtx.id);
+      const fromIdx = state.conversations.indexOf(conv);
+      if (fromIdx >= 0) { state.conversations.splice(fromIdx, 1); state.conversations.splice(dropIdx, 0, conv); save(); }
+      dragCtx = null; isLongPress = false; renderSidebar();
+    } else {
+      dragCtx = null;
+    }
+  }
+
+  convList.addEventListener('mousedown', (e) => {
+    const item = e.target.closest('.conv-item');
+    if (!item || e.target.classList.contains('del-btn') || e.target.tagName === 'INPUT') return;
+    beginHold(item, e.clientY);
+  });
+  document.addEventListener('mousemove', (e) => { if (dragCtx) continueHold(e.clientY); });
+  document.addEventListener('mouseup', () => endHold());
+
+  convList.addEventListener('touchstart', (e) => {
+    const item = e.target.closest('.conv-item');
+    if (!item || e.target.classList.contains('del-btn') || e.target.tagName === 'INPUT') return;
+    beginHold(item, e.touches[0].clientY);
+  }, { passive: true });
+  document.addEventListener('touchmove', (e) => {
+    if (dragCtx) {
+      if (dragCtx.mode === 'drag') e.preventDefault();
+      continueHold(e.touches[0].clientY);
+    }
+  }, { passive: false });
+  document.addEventListener('touchend', () => endHold());
+
+  // Click elsewhere to dismiss long-press
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('#bg-menu') && !e.target.closest('#btn-bg')) hideBgMenu();
+    if (!e.target.closest('.conv-item')) {
+      convList.querySelectorAll('.conv-item.long-press').forEach(el => el.classList.remove('long-press'));
+    }
   });
 
   // Enable send button on init
@@ -675,17 +777,19 @@ function renderSidebar() {
   // Click to switch
   convList.querySelectorAll('.conv-item').forEach(el => {
     el.addEventListener('click', (e) => {
+      if (isLongPress) { isLongPress = false; return; }
       if (e.target.classList.contains('del-btn')) return;
       if (e.target.tagName === 'INPUT') return;
       switchConversation(el.dataset.id);
     });
   });
 
-  // Rename conversation by clicking its title
+  // Rename conversation — only on long-press
   convList.querySelectorAll('.conv-title').forEach(span => {
     span.addEventListener('click', (e) => {
-      e.stopPropagation();
       const convItem = span.closest('.conv-item');
+      if (!convItem || !convItem.classList.contains('long-press')) return;
+      e.stopPropagation();
       const id = convItem.dataset.id;
       const conv = state.conversations.find(c => c.id === id);
       if (!conv) return;
