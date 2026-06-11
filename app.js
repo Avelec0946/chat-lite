@@ -89,7 +89,6 @@ function save() {
       return resp.json();
     }).catch(function(err) {
       console.error('Server save error:', err);
-      showToast('服务端保存失败，请勿刷新页面', 'warn');
       // Retry once after 2s
       return new Promise(function(resolve) {
         setTimeout(function() {
