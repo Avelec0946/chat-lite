@@ -534,14 +534,18 @@ async function init() {
         var r = items[i].getBoundingClientRect();
         if (clientY < r.top + r.height / 2) { items[i].classList.add('drag-target'); break; }
       }
-      // Auto-scroll near edges
+      // Auto-scroll near edges (speed proportional to proximity)
       var convRect = convList.getBoundingClientRect();
-      var edgeZone = 50;
+      var edgeZone = 60;
+      var dist = 0, speed = 0;
       if (clientY < convRect.top + edgeZone) {
-        convList.scrollTop -= 8;
+        dist = clientY - convRect.top;
+        speed = -Math.round(20 * (1 - dist / edgeZone));
       } else if (clientY > convRect.bottom - edgeZone) {
-        convList.scrollTop += 8;
+        dist = convRect.bottom - clientY;
+        speed = Math.round(20 * (1 - dist / edgeZone));
       }
+      if (speed) convList.scrollTop += speed;
     }
   }
 
