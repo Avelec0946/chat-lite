@@ -954,10 +954,12 @@ function renderMessages() {
         <div class="msg-actions">
           <button class="msg-action-btn edit-btn" title="编辑">编辑</button>
           <button class="msg-action-btn regenerate-btn" title="重新生成" ${state.loading ? 'disabled' : ''}>重试</button>
+          <button class="msg-action-btn copy-btn" title="复制全文">复制</button>
         </div>` : ''}
         ${msg.role === 'user' && !msg.editing && !msg.isFileOnly ? `
         <div class="msg-actions">
           <button class="msg-action-btn edit-btn" title="编辑">编辑</button>
+          <button class="msg-action-btn copy-btn" title="复制全文">复制</button>
         </div>` : ''}
       </div>
     `;
@@ -969,6 +971,15 @@ function renderMessages() {
 
     const regenBtn = div.querySelector('.regenerate-btn');
     if (regenBtn) regenBtn.addEventListener('click', () => regenerate(msg.id));
+
+    const copyBtn = div.querySelector('.copy-btn');
+    if (copyBtn) copyBtn.addEventListener('click', () => {
+      var text = msg.content || '';
+      navigator.clipboard.writeText(text).then(() => {
+        copyBtn.textContent = '已复制';
+        setTimeout(() => { copyBtn.textContent = '复制'; }, 1500);
+      }).catch(() => {});
+    });
 
     if (msg.editing) {
       const textarea = div.querySelector('.msg-edit-textarea');
