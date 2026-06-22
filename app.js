@@ -1080,6 +1080,15 @@ function renderContent(msg) {
     html += `<span class="msg-wordcount">${wc}字</span>`;
   }
 
+  // Interrupted marker + continue button
+  if (msg.interrupted) {
+    const reason = msg.errorMsg ? escapeHtml(msg.errorMsg) : '生成中断';
+    html += `<div class="interrupted-bar">
+      <span class="interrupted-reason">⚠ ${reason}</span>
+      <button class="continue-btn" onclick="continueGeneration('${msg.id}')">继续生成</button>
+    </div>`;
+  }
+
   return html;
 }
 
@@ -1466,8 +1475,179 @@ async function sendFromMessage(context) {
 
   } catch (err) {
     console.error('Send error:', err);
-    assistantMsg.content = `**错误：** ${escapeHtml(err.message)}`;
-    assistantMsg.isError = true;
+    // 保留已生成内容，标记为中断
+    assistantMsg.interrupted = true;
+    assistantMsg.errorMsg = err.name === 'AbortError' ? '用户打断' : err.message;
+    if (!assistantMsg.content) {
+      // 如果完全没有内容，才显示错误
+      assistantMsg.content = `**错误：** ${escapeHtml(err.message)}`;
+      assistantMsg.isError = true;
+    }
+    save();
+    renderMessages();
+    setStatus('err');
+  } finally {
+    state.loading = false;
+    state.abortController = null;
+    updateSendButton();
+    toggleSendStop();
+    renderMessages();
+    scrollToBottom();
+  }
+}
+
+// ===== Continue Generation =====
+async function continueGeneration(msgId) {
+  const conv = currentConv();
+  if (!conv || state.loading) return;
+
+  const msg = getMsg(conv, msgId);
+  if (!msg || !msg.interrupted) return;
+
+  // Clear interrupted state
+  msg.interrupted = false;
+  msg.errorMsg = '';
+  save();
+  renderMessages();
+
+  // Build context: system prompt + history up to this message
+  const context = buildContextForContinue(conv, msg);
+  await sendFromMessageContinue(context, msg);
+}
+
+function buildContextForContinue(conv, targetMsg) {
+  const msgs = [];
+
+  // System prompt
+  const sysParts = [];
+  if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
+  if (conv.userIdentity) sysParts.push('用户身份：' + conv.userIdentity);
+  if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\n\n') });
+
+  // Walk up from targetMsg to root, collect messages
+  const chain = [];
+  let current = targetMsg;
+  while (current && current.parentId) {
+    chain.unshift(current);
+    current = conv.messageMap[current.parentId];
+  }
+
+  for (const m of chain) {
+    if (!m || m.role === 'system') continue;
+    let content = m.content;
+    if (m.files && m.files.length > 0 && m.role === 'user') {
+      const fileContext = m.files.map(f => `--- ${f.name} ---\n${f.content}`).join('\n\n');
+      content = m.content
+        ? `用户附带了以下文件内容：\n${fileContext}\n\n用户消息：\n${m.content}`
+        : `用户附带了以下文件内容：\n${fileContext}`;
+    }
+    msgs.push({ role: m.role, content });
+  }
+
+  return msgs;
+}
+
+async function sendFromMessageContinue(context, assistantMsg) {
+  const conv = currentConv();
+  if (!conv) return;
+
+  state.loading = true;
+  state.abortController = new AbortController();
+  updateSendButton();
+  toggleSendStop();
+  setStatus('busy');
+
+  // Save existing content for continuation
+  const existingContent = assistantMsg.content || '';
+  const existingReasoning = assistantMsg.reasoningContent || '';
+
+  renderMessages();
+  const lastMsgEl = messagesEl.querySelector(`.message[data-id="${assistantMsg.id}"] .msg-bubble`);
+  if (lastMsgEl) lastMsgEl.classList.add('cursor-blink');
+
+  try {
+    var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
+    var useDirect = settings.directMode || !isLocal;
+    var apiUrl = useDirect
+      ? 'https://api.deepseek.com/v1/chat/completions'
+      : '/api/chat/completions';
+    var apiKey = settings.apiKey || settings.directKey || '';
+    if (useDirect && !apiKey) {
+      assistantMsg.content = existingContent + '\n\n**错误：** 直连模式需要设置 API 密钥';
+      save(); renderMessages(); state.loading = false;
+      toggleSendStop(); scrollToBottom(); return;
+    }
+    var reqHeaders = { 'Content-Type': 'application/json' };
+    if (useDirect) reqHeaders['Authorization'] = 'Bearer ' + apiKey;
+    var reqBody = {
+      messages: context,
+      model: conv.model || modelSelect.value,
+      stream: true,
+      thinkingEnabled: conv.thinkingEnabled !== false
+    };
+    if (!useDirect) reqBody.apiKey = apiKey || undefined;
+    var shouldDisableThinking = conv.thinkingEnabled === false;
+    if (useDirect) {
+      if (shouldDisableThinking) reqBody.thinking = { type: 'disabled' };
+      delete reqBody.thinkingEnabled;
+    }
+
+    const resp = await fetch(apiUrl, {
+      method: 'POST',
+      headers: reqHeaders,
+      body: JSON.stringify(reqBody),
+      signal: state.abortController?.signal
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.detail || err.error || `HTTP ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = existingContent;
+    let fullReasoning = existingReasoning;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const json = JSON.parse(data);
+          const delta = json.choices?.[0]?.delta;
+          if (delta) {
+            if (delta.reasoning_content) {
+              fullReasoning += delta.reasoning_content;
+              assistantMsg.reasoningContent = fullReasoning;
+            }
+            if (delta.content) {
+              fullContent += delta.content;
+              assistantMsg.content = fullContent;
+            }
+            updateMessageContent(assistantMsg.id, fullContent, fullReasoning);
+          }
+        } catch(e) {}
+      }
+    }
+
+    assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'continued' };
+    save();
+    setStatus('ok');
+
+  } catch (err) {
+    console.error('Continue error:', err);
+    assistantMsg.interrupted = true;
+    assistantMsg.errorMsg = err.name === 'AbortError' ? '用户打断' : err.message;
     save();
     renderMessages();
     setStatus('err');
