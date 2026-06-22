@@ -1083,7 +1083,14 @@ function renderContent(msg) {
   html += rendered;
 
   // Status bar: extract <status>...</status> and render as styled block
-  var statusMatch = (msg.content || '').match(/<status>([\s\S]*?)<\/status>/);
+  // Use lastIndexOf to find the LAST <status> tag (avoid matching examples in debug output)
+  var content = msg.content || '';
+  var lastStatusStart = content.lastIndexOf('<status>');
+  var lastStatusEnd = content.lastIndexOf('</status>');
+  var statusMatch = null;
+  if (lastStatusStart !== -1 && lastStatusEnd !== -1 && lastStatusEnd > lastStatusStart) {
+    statusMatch = [content.slice(lastStatusStart, lastStatusEnd + '</status>'.length), content.slice(lastStatusStart + '<status>'.length, lastStatusEnd)];
+  }
   if (statusMatch) {
     var statusHtml = marked.parse(statusMatch[1].trim(), { breaks: true, gfm: true });
     var conv = currentConv();
