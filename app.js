@@ -1349,13 +1349,13 @@ function buildContext(conv) {
   if (conv.systemPrompt) {
     sysParts.push(conv.systemPrompt);
   }
-  if (conv.userIdentity) {
-    sysParts.push('用户身份：' + conv.userIdentity);
-  }
-  // Status bar instruction
+  // Status bar instruction (before user identity)
   if (settings.statusBar && settings.statusBar.enabled) {
     var sbTemplate = settings.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
     sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\n<status>【角色状态】\n当前地点：xxx\n当前行动：xxx\n当前穿搭：xxx\n内心独白："xxx"\n</status>');
+  }
+  if (conv.userIdentity) {
+    sysParts.push('用户身份：' + conv.userIdentity);
   }
   if (sysParts.length > 0) {
     msgs.push({ role: 'system', content: sysParts.join('\n\n') });
