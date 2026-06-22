@@ -205,7 +205,7 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return JSON.parse(raw);
   } catch(e) {}
-  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false };
+  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false, statusBar: { enabled: false, template: '', position: 'bottom' } };
 }
 
 function saveSettings() {
@@ -484,6 +484,14 @@ async function init() {
     e.target.value = '';
   });
   $('btn-remove-bg').addEventListener('click', removeBackgroundImage);
+
+  // Status bar toggle
+  $('statusbar-toggle').addEventListener('change', function() {
+    var show = this.checked;
+    $('statusbar-template-row').style.display = show ? '' : 'none';
+    $('statusbar-template-hint').style.display = show ? '' : 'none';
+    $('statusbar-position-row').style.display = show ? '' : 'none';
+  });
 
   // Long press + drag to reorder conversations
   let longPressTimer = null;
@@ -1074,6 +1082,29 @@ function renderContent(msg) {
   const rendered = marked.parse(msg.content || '', { breaks: true, gfm: true });
   html += rendered;
 
+  // Status bar: extract <status>...</status> and render as styled block
+  var statusMatch = (msg.content || '').match(/<status>([\s\S]*?)<\/status>/);
+  if (statusMatch) {
+    var statusHtml = marked.parse(statusMatch[1].trim(), { breaks: true, gfm: true });
+    var position = (settings.statusBar && settings.statusBar.position) || 'bottom';
+    var statusBarHtml = '<div class="status-bar status-bar-' + position + '">' + statusHtml + '</div>';
+    if (position === 'top') {
+      // Insert after reasoning, before main content
+      var reasoningEnd = html.indexOf('</details>');
+      if (reasoningEnd !== -1) {
+        reasoningEnd += '</details>'.length;
+        html = html.slice(0, reasoningEnd) + statusBarHtml + html.slice(reasoningEnd);
+      } else {
+        html = statusBarHtml + html;
+      }
+    } else {
+      html += statusBarHtml;
+    }
+    // Remove the raw <status> tags from rendered content
+    html = html.replace(/&lt;status&gt;[\s\S]*?&lt;\/status&gt;/g, '');
+    html = html.replace(/<status>[\s\S]*?<\/status>/g, '');
+  }
+
   // Word count
   const wc = countWords(msg.content || '');
   if (wc > 0) {
@@ -1320,6 +1351,11 @@ function buildContext(conv) {
   }
   if (conv.userIdentity) {
     sysParts.push('用户身份：' + conv.userIdentity);
+  }
+  // Status bar instruction
+  if (settings.statusBar && settings.statusBar.enabled) {
+    var sbTemplate = settings.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
+    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\n<status>【角色状态】\n当前地点：xxx\n当前行动：xxx\n当前穿搭：xxx\n内心独白："xxx"\n</status>');
   }
   if (sysParts.length > 0) {
     msgs.push({ role: 'system', content: sysParts.join('\n\n') });
@@ -2254,6 +2290,14 @@ function toggleSettings(open) {
     const lsSelect = document.getElementById('line-spacing-select');
     if (fsSelect) fsSelect.value = settings.fontSize || '15';
     if (lsSelect) lsSelect.value = settings.lineSpacing || '1.6';
+    // Status bar settings
+    var sb = settings.statusBar || { enabled: false, template: '', position: 'bottom' };
+    $('statusbar-toggle').checked = sb.enabled;
+    $('statusbar-template').value = sb.template || '';
+    $('statusbar-position').value = sb.position || 'bottom';
+    $('statusbar-template-row').style.display = sb.enabled ? '' : 'none';
+    $('statusbar-template-hint').style.display = sb.enabled ? '' : 'none';
+    $('statusbar-position-row').style.display = sb.enabled ? '' : 'none';
   }
 }
 
@@ -2265,6 +2309,12 @@ function saveSettingsHandler() {
   const lsSelect = document.getElementById('line-spacing-select');
   if (fsSelect) settings.fontSize = fsSelect.value;
   if (lsSelect) settings.lineSpacing = lsSelect.value;
+  // Status bar settings
+  settings.statusBar = {
+    enabled: $('statusbar-toggle').checked,
+    template: $('statusbar-template').value.trim(),
+    position: $('statusbar-position').value
+  };
   applyDisplaySettings();
   saveSettings();
 
