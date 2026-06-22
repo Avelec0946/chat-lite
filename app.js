@@ -1350,6 +1350,10 @@ function buildContext(conv) {
   if (conv.systemPrompt) {
     sysParts.push(conv.systemPrompt);
   }
+  // Emphasis prompt (after system prompt, before status bar)
+  if (conv.emphasis) {
+    sysParts.push('【重要强调】' + conv.emphasis);
+  }
   // Status bar instruction (before user identity)
   if (conv.statusBar && conv.statusBar.enabled) {
     var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
@@ -1558,6 +1562,8 @@ function buildContextForContinue(conv, targetMsg) {
   // System prompt
   const sysParts = [];
   if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
+  // Emphasis prompt (after system prompt, before status bar)
+  if (conv.emphasis) sysParts.push('【重要强调】' + conv.emphasis);
   // Status bar instruction (before user identity)
   if (conv.statusBar && conv.statusBar.enabled) {
     var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
@@ -2289,6 +2295,7 @@ function toggleSettings(open) {
     const conv = currentConv();
     thinkingToggle.checked = conv ? conv.thinkingEnabled : settings.thinkingEnabled;
     systemPromptInput.value = conv?.systemPrompt || '';
+    $('emphasis-prompt').value = conv?.emphasis || '';
     userIdentityInput.value = conv?.userIdentity || '';
     apiKeyInput.value = settings.apiKey || '';
     // Display settings
@@ -2323,6 +2330,7 @@ function saveSettingsHandler() {
   if (conv) {
     conv.thinkingEnabled = thinkingToggle.checked;
     conv.systemPrompt = systemPromptInput.value.trim();
+    conv.emphasis = $('emphasis-prompt').value.trim();
     conv.userIdentity = userIdentityInput.value.trim();
     conv.statusBar = {
       enabled: $('statusbar-toggle').checked,
