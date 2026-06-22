@@ -137,13 +137,32 @@
           <span>系统提示词</span>
           <textarea id="system-prompt" class="setting-textarea" rows="3" placeholder="输入系统提示词..."></textarea>
         </label>
+        <div class="setting-divider"></div>
+        <span class="setting-section-title">状态栏</span>
+        <label class="setting-row">
+          <span>启用状态栏</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="statusbar-toggle">
+            <span class="toggle-slider"></span>
+          </label>
+        </label>
+        <span class="setting-hint">模型回复末尾自动附加结构化状态信息（&lt;status&gt; 标签）</span>
+        <label class="setting-row setting-row-col" id="statusbar-template-row" style="display:none">
+          <span>提示模板</span>
+          <textarea id="statusbar-template" class="setting-textarea" rows="3" placeholder="告诉模型状态栏应该包含哪些内容..."></textarea>
+        </label>
+        <span class="setting-hint" id="statusbar-template-hint" style="display:none">留空则使用默认模板。此内容会注入到每轮对话的系统提示中。</span>
+        <label class="setting-row" id="statusbar-position-row" style="display:none">
+          <span>显示位置</span>
+          <select id="statusbar-position" class="setting-select">
+            <option value="bottom" selected>消息底部</option>
+            <option value="top">消息顶部</option>
+          </select>
+        </label>
+        <div class="setting-divider"></div>
         <label class="setting-row setting-row-col">
           <span>用户身份</span>
           <textarea id="user-identity" class="setting-textarea" rows="2" placeholder="如：我是大二计算机系学生..."></textarea>
-        </label>
-        <label class="setting-row setting-row-col">
-          <span>API 密钥</span>
-          <input type="password" id="api-key-input" class="setting-input" placeholder="留空使用 config.json 默认">
         </label>
         <div class="setting-divider"></div>
         <label class="setting-row">
@@ -196,26 +215,9 @@
           <button id="btn-remove-bg" class="btn btn-small" style="background:var(--bg3);color:var(--text)">移除背景</button>
         </div>
         <div class="setting-divider"></div>
-        <span class="setting-section-title">状态栏</span>
-        <label class="setting-row">
-          <span>启用状态栏</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="statusbar-toggle">
-            <span class="toggle-slider"></span>
-          </label>
-        </label>
-        <span class="setting-hint">模型回复末尾自动附加结构化状态信息（&lt;status&gt; 标签）</span>
-        <label class="setting-row setting-row-col" id="statusbar-template-row" style="display:none">
-          <span>提示模板</span>
-          <textarea id="statusbar-template" class="setting-textarea" rows="3" placeholder="告诉模型状态栏应该包含哪些内容..."></textarea>
-        </label>
-        <span class="setting-hint" id="statusbar-template-hint" style="display:none">留空则使用默认模板。此内容会注入到每轮对话的系统提示中。</span>
-        <label class="setting-row" id="statusbar-position-row" style="display:none">
-          <span>显示位置</span>
-          <select id="statusbar-position" class="setting-select">
-            <option value="bottom" selected>消息底部</option>
-            <option value="top">消息顶部</option>
-          </select>
+        <label class="setting-row setting-row-col">
+          <span>API 密钥</span>
+          <input type="password" id="api-key-input" class="setting-input" placeholder="留空使用 config.json 默认">
         </label>
       </div>
       <div class="settings-footer">
