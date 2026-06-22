@@ -205,7 +205,7 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return JSON.parse(raw);
   } catch(e) {}
-  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false, statusBar: { enabled: false, template: '', position: 'bottom' } };
+  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false };
 }
 
 function saveSettings() {
@@ -1086,7 +1086,8 @@ function renderContent(msg) {
   var statusMatch = (msg.content || '').match(/<status>([\s\S]*?)<\/status>/);
   if (statusMatch) {
     var statusHtml = marked.parse(statusMatch[1].trim(), { breaks: true, gfm: true });
-    var position = (settings.statusBar && settings.statusBar.position) || 'bottom';
+    var conv = currentConv();
+    var position = (conv?.statusBar?.position) || 'bottom';
     var statusBarHtml = '<div class="status-bar status-bar-' + position + '">' + statusHtml + '</div>';
     if (position === 'top') {
       // Insert after reasoning, before main content
@@ -1350,8 +1351,8 @@ function buildContext(conv) {
     sysParts.push(conv.systemPrompt);
   }
   // Status bar instruction (before user identity)
-  if (settings.statusBar && settings.statusBar.enabled) {
-    var sbTemplate = settings.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
+  if (conv.statusBar && conv.statusBar.enabled) {
+    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
     sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\n<status>【角色状态】\n当前地点：xxx\n当前行动：xxx\n当前穿搭：xxx\n内心独白："xxx"\n</status>');
   }
   if (conv.userIdentity) {
@@ -1557,6 +1558,11 @@ function buildContextForContinue(conv, targetMsg) {
   // System prompt
   const sysParts = [];
   if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
+  // Status bar instruction (before user identity)
+  if (conv.statusBar && conv.statusBar.enabled) {
+    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
+    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\n<status>【角色状态】\n当前地点：xxx\n当前行动：xxx\n当前穿搭：xxx\n内心独白："xxx"\n</status>');
+  }
   if (conv.userIdentity) sysParts.push('用户身份：' + conv.userIdentity);
   if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\n\n') });
 
@@ -2290,8 +2296,8 @@ function toggleSettings(open) {
     const lsSelect = document.getElementById('line-spacing-select');
     if (fsSelect) fsSelect.value = settings.fontSize || '15';
     if (lsSelect) lsSelect.value = settings.lineSpacing || '1.6';
-    // Status bar settings
-    var sb = settings.statusBar || { enabled: false, template: '', position: 'bottom' };
+    // Status bar settings (per-conversation)
+    var sb = conv?.statusBar || { enabled: false, template: '', position: 'bottom' };
     $('statusbar-toggle').checked = sb.enabled;
     $('statusbar-template').value = sb.template || '';
     $('statusbar-position').value = sb.position || 'bottom';
@@ -2309,21 +2315,20 @@ function saveSettingsHandler() {
   const lsSelect = document.getElementById('line-spacing-select');
   if (fsSelect) settings.fontSize = fsSelect.value;
   if (lsSelect) settings.lineSpacing = lsSelect.value;
-  // Status bar settings
-  settings.statusBar = {
-    enabled: $('statusbar-toggle').checked,
-    template: $('statusbar-template').value.trim(),
-    position: $('statusbar-position').value
-  };
   applyDisplaySettings();
   saveSettings();
 
-  // Per-conversation only: save prompts directly from input fields
+  // Per-conversation: save prompts and status bar settings
   const conv = currentConv();
   if (conv) {
     conv.thinkingEnabled = thinkingToggle.checked;
     conv.systemPrompt = systemPromptInput.value.trim();
     conv.userIdentity = userIdentityInput.value.trim();
+    conv.statusBar = {
+      enabled: $('statusbar-toggle').checked,
+      template: $('statusbar-template').value.trim(),
+      position: $('statusbar-position').value
+    };
     save();
   }
 
