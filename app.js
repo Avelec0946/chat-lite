@@ -1385,6 +1385,11 @@ function buildContext(conv) {
     msgs.push({ role: m.role, content });
   }
 
+  // Post-History Instruction: status bar reminder right before generation
+  if (conv.statusBar && conv.statusBar.enabled) {
+    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏。这是强制格式要求，不可省略。' });
+  }
+
   return msgs;
 }
 
@@ -1590,6 +1595,11 @@ function buildContextForContinue(conv, targetMsg) {
         : `用户附带了以下文件内容：\n${fileContext}`;
     }
     msgs.push({ role: m.role, content });
+  }
+
+  // Post-History Instruction: status bar reminder right before generation
+  if (conv.statusBar && conv.statusBar.enabled) {
+    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏。这是强制格式要求，不可省略。' });
   }
 
   return msgs;
