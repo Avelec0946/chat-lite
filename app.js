@@ -1357,7 +1357,8 @@ function buildContext(conv) {
   // Status bar instruction (before user identity)
   if (conv.statusBar && conv.statusBar.enabled) {
     var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\n<status>【角色状态】\n当前地点：xxx\n当前行动：xxx\n当前穿搭：xxx\n内心独白："xxx"\n</status>');
+    var sbExample = sbTemplate.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
+    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>【角色状态】\\n' + sbExample + '\\n</status>');
   }
   if (conv.userIdentity) {
     sysParts.push('用户身份：' + conv.userIdentity);
@@ -1386,17 +1387,14 @@ function buildContext(conv) {
 
     // Mid-context injection: remind every 4 messages
     if (conv.statusBar && conv.statusBar.enabled && msgs.length % 4 === 0) {
-      var _sbT = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容：' + _sbT + '。' });
+      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签。' });
     }
   }
 
   // Post-History Instruction: status bar reminder right before generation
   if (conv.statusBar && conv.statusBar.enabled) {
-    var sbPHI = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾用 <status>...</status> 标签输出状态栏，内容：' + sbPHI + '。格式：<status>【角色状态】\\n' + sbPHI.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n') + '\\n</status>。不可省略。' });
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏。内容：' + sbTemplate + '。格式示例：<status>【角色状态】\\n当前地点：xxx\\n当前行动：xxx\\n</status> 这是强制要求，不可省略。' });
+    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏。这是强制格式要求，不可省略。' });
+    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏。这是强制要求，不可省略。' });
   }
 
   return msgs;
@@ -1581,10 +1579,11 @@ function buildContextForContinue(conv, targetMsg) {
   // Status bar instruction (before user identity)
   if (conv.statusBar && conv.statusBar.enabled) {
     var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\n<status>【角色状态】\n当前地点：xxx\n当前行动：xxx\n当前穿搭：xxx\n内心独白："xxx"\n</status>');
+    var sbExample = sbTemplate.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
+    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>【角色状态】\\n' + sbExample + '\\n</status>');
   }
   if (conv.userIdentity) sysParts.push('用户身份：' + conv.userIdentity);
-  if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\n\n') });
+  if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\\n\\n') });
 
   // Walk up from targetMsg to root, collect messages
   const chain = [];
@@ -1607,17 +1606,14 @@ function buildContextForContinue(conv, targetMsg) {
 
     // Mid-context injection: remind every 4 messages
     if (conv.statusBar && conv.statusBar.enabled && msgs.length % 4 === 0) {
-      var _sbT = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容：' + _sbT + '。' });
+      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签。' });
     }
   }
 
   // Post-History Instruction: status bar reminder right before generation
   if (conv.statusBar && conv.statusBar.enabled) {
-    var sbPHI = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾用 <status>...</status> 标签输出状态栏，内容：' + sbPHI + '。格式：<status>【角色状态】\\n' + sbPHI.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n') + '\\n</status>。不可省略。' });
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏。内容：' + sbTemplate + '。格式示例：<status>【角色状态】\\n当前地点：xxx\\n当前行动：xxx\\n</status> 这是强制要求，不可省略。' });
+    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏。这是强制格式要求，不可省略。' });
+    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏。这是强制要求，不可省略。' });
   }
 
   return msgs;
