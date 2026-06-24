@@ -313,7 +313,7 @@ function saveProviderFromEditor() {
     return;
   }
   var editIdx = editor.dataset.editIdx;
-  if (editIdx !== '' && editIdx !== undefined) {
+  if (editIdx !== '' && editIdx !== undefined && parseInt(editIdx) >= 0) {
     // Edit existing
     state.providers[parseInt(editIdx)].name = name;
     state.providers[parseInt(editIdx)].baseUrl = baseUrl;
