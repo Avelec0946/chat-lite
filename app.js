@@ -64,6 +64,292 @@ function showToast(msg, type) {
   t._timer = setTimeout(function() { t.classList.remove('show'); }, 4000);
 }
 
+// ===== Provider System =====
+const PROVIDERS_KEY = 'chatlite_providers';
+state.providers = [];
+
+function getProvider(id) {
+  return (state.providers || []).find(p => p.id === id) || null;
+}
+
+function normalizeBaseUrl(url) {
+  url = (url || '').trim().replace(/\/+$/, '');
+  if (!url.endsWith('/v1')) url += '/v1';
+  return url;
+}
+
+async function loadProviders() {
+  try {
+    var data = await idbGet(PROVIDERS_KEY);
+    if (data && Array.isArray(data)) {
+      state.providers = data;
+      return;
+    }
+  } catch(e) { console.warn('loadProviders failed:', e); }
+  state.providers = [];
+}
+
+function saveProviders() {
+  idbPut(PROVIDERS_KEY, state.providers).catch(function(e) {
+    console.warn('saveProviders failed:', e);
+    showToast('接口配置保存失败', 'warn');
+  });
+}
+
+function migrateOldApiKey() {
+  // One-time migration from old settings.apiKey to Provider system
+  if (state.providers.length > 0) return; // already has providers
+  var oldKey = settings.apiKey || '';
+  if (!oldKey) return; // no old key to migrate
+  var provider = {
+    id: uid(),
+    name: 'DeepSeek',
+    baseUrl: normalizeBaseUrl('https://api.deepseek.com/v1'),
+    apiKey: oldKey,
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    createdAt: Date.now()
+  };
+  state.providers.push(provider);
+  saveProviders();
+  // Migrate conversations: match model name to provider
+  for (var conv of state.conversations) {
+    if (!conv.providerId) {
+      var matched = state.providers.find(p => p.models && p.models.includes(conv.model));
+      if (matched) conv.providerId = matched.id;
+    }
+  }
+  // Clear old key
+  delete settings.apiKey;
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  console.log('Migrated old API key to Provider system');
+}
+
+function renderModelSelector() {
+  var sel = $('model-select');
+  if (!sel) return;
+  if (!state.providers || state.providers.length === 0) {
+    sel.innerHTML = '<option disabled selected>请先在设置中添加接口</option>';
+    return;
+  }
+  var html = '';
+  for (var p of state.providers) {
+    if (!p.models || p.models.length === 0) continue;
+    html += '<optgroup label="' + escapeHtml(p.name) + '">';
+    for (var m of p.models) {
+      var val = p.id + ':' + m;
+      html += '<option value="' + escapeHtml(val) + '">' + escapeHtml(m) + '</option>';
+    }
+    html += '</optgroup>';
+  }
+  sel.innerHTML = html;
+}
+
+function syncModelSelector() {
+  var conv = currentConv();
+  if (!conv) return;
+  if (conv.providerId && conv.model) {
+    var val = conv.providerId + ':' + conv.model;
+    var sel = $('model-select');
+    if (sel && sel.querySelector('option[value="' + CSS.escape(val) + '"]')) {
+      sel.value = val;
+    } else {
+      // Fallback: find first available
+      var fallback = state.providers.find(p => p.models && p.models.length > 0);
+      if (fallback) {
+        conv.providerId = fallback.id;
+        conv.model = fallback.models[0];
+        sel.value = fallback.id + ':' + fallback.models[0];
+      }
+    }
+  } else if (state.providers.length > 0) {
+    var p = state.providers[0];
+    if (p.models && p.models.length > 0) {
+      conv.providerId = p.id;
+      conv.model = p.models[0];
+      var sel2 = $('model-select');
+      if (sel2) sel2.value = p.id + ':' + p.models[0];
+    }
+  }
+}
+
+// ===== Vision: Image Upload =====
+function compressImageForUpload(file) {
+  return new Promise(function(resolve) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var img = new Image();
+      img.onload = function() {
+        var canvas = document.createElement('canvas');
+        var maxDim = 1024;
+        var w = img.width, h = img.height;
+        if (w > maxDim || h > maxDim) {
+          if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+          else { w = Math.round(w * maxDim / h); h = maxDim; }
+        }
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.75));
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function buildFileContent(m) {
+  if (!m.files || m.files.length === 0 || m.role !== 'user') return m.content;
+  var hasImages = m.files.some(function(f) { return f.isImage; });
+  if (hasImages) {
+    var parts = [];
+    if (m.content) parts.push({ type: 'text', text: m.content });
+    for (var f of m.files) {
+      if (f.isImage) {
+        parts.push({ type: 'image_url', image_url: { url: 'data:' + f.mimeType + ';base64,' + f.base64 } });
+      } else {
+        parts.push({ type: 'text', text: '--- ' + f.name + ' ---\n' + f.content });
+      }
+    }
+    return parts;
+  } else {
+    var fileContext = m.files.map(function(f) { return '--- ' + f.name + ' ---\n' + f.content; }).join('\n\n');
+    return m.content
+      ? '用户附带了以下文件内容：\n' + fileContext + '\n\n用户消息：\n' + m.content
+      : '用户附带了以下文件内容：\n' + fileContext;
+  }
+}
+
+// ===== Provider Management UI =====
+function renderProviderList() {
+  var container = document.getElementById('provider-list');
+  if (!container) return;
+  if (!state.providers || state.providers.length === 0) {
+    container.innerHTML = '<div class="provider-empty">暂无接口，点击上方按钮添加</div>';
+    return;
+  }
+  container.innerHTML = state.providers.map(function(p, i) {
+    var models = (p.models || []).join(', ') || '(无模型)';
+    return '<div class="provider-item" data-idx="' + i + '">' +
+      '<div class="provider-header">' +
+        '<span class="provider-name">' + escapeHtml(p.name) + '</span>' +
+        '<div class="provider-actions">' +
+          '<button class="btn btn-small provider-edit" data-idx="' + i + '">编辑</button>' +
+          '<button class="btn btn-small provider-delete" data-idx="' + i + '" style="background:var(--bg3);color:var(--text)">删除</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="provider-detail">' +
+        '<span class="provider-url">' + escapeHtml(p.baseUrl) + '</span>' +
+        '<span class="provider-models">模型: ' + escapeHtml(models) + '</span>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  container.querySelectorAll('.provider-edit').forEach(function(btn) {
+    btn.addEventListener('click', function() { openProviderEditor(parseInt(btn.dataset.idx)); });
+  });
+  container.querySelectorAll('.provider-delete').forEach(function(btn) {
+    btn.addEventListener('click', function() { deleteProvider(parseInt(btn.dataset.idx)); });
+  });
+}
+
+function openProviderEditor(idx) {
+  var editor = document.getElementById('provider-editor');
+  var p = (idx !== undefined && idx >= 0) ? state.providers[idx] : null;
+  editor.style.display = 'block';
+  editor.dataset.editIdx = idx !== undefined ? idx : '';
+  document.getElementById('provider-name-input').value = p ? p.name : '';
+  document.getElementById('provider-url-input').value = p ? p.baseUrl : '';
+  document.getElementById('provider-key-input').value = p ? p.apiKey : '';
+  document.getElementById('provider-models-input').value = p ? (p.models || []).join(', ') : '';
+  document.getElementById('provider-test-result').textContent = '';
+  document.getElementById('provider-test-result').className = 'provider-test-result';
+}
+
+function closeProviderEditor() {
+  document.getElementById('provider-editor').style.display = 'none';
+}
+
+async function testProviderConnection() {
+  var baseUrl = normalizeBaseUrl(document.getElementById('provider-url-input').value);
+  var apiKey = document.getElementById('provider-key-input').value.trim();
+  var resultEl = document.getElementById('provider-test-result');
+  if (!baseUrl || !apiKey) {
+    resultEl.textContent = '请填写 API 地址和密钥';
+    resultEl.className = 'provider-test-result error';
+    return;
+  }
+  resultEl.textContent = '测试中...';
+  resultEl.className = 'provider-test-result';
+  try {
+    var resp = await fetch(baseUrl + '/models', {
+      headers: { 'Authorization': 'Bearer ' + apiKey }
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var data = await resp.json();
+    var models = (data.data || []).map(function(m) { return m.id; }).filter(Boolean);
+    if (models.length > 0) {
+      document.getElementById('provider-models-input').value = models.join(', ');
+      resultEl.textContent = '✅ 连接成功，发现 ' + models.length + ' 个模型';
+      resultEl.className = 'provider-test-result success';
+    } else {
+      resultEl.textContent = '⚠️ 连接成功但未发现模型，请手动填写';
+      resultEl.className = 'provider-test-result warn';
+    }
+  } catch(e) {
+    resultEl.textContent = '❌ 连接失败: ' + e.message;
+    resultEl.className = 'provider-test-result error';
+  }
+}
+
+function saveProviderFromEditor() {
+  var editor = document.getElementById('provider-editor');
+  var name = document.getElementById('provider-name-input').value.trim();
+  var baseUrl = normalizeBaseUrl(document.getElementById('provider-url-input').value);
+  var apiKey = document.getElementById('provider-key-input').value.trim();
+  var modelsStr = document.getElementById('provider-models-input').value.trim();
+  var models = modelsStr ? modelsStr.split(/[,，]/).map(function(s) { return s.trim(); }).filter(Boolean) : [];
+  if (!name || !baseUrl || !apiKey) {
+    showToast('请填写接口名称、地址和密钥', 'warn');
+    return;
+  }
+  var editIdx = editor.dataset.editIdx;
+  if (editIdx !== '' && editIdx !== undefined) {
+    // Edit existing
+    state.providers[parseInt(editIdx)].name = name;
+    state.providers[parseInt(editIdx)].baseUrl = baseUrl;
+    state.providers[parseInt(editIdx)].apiKey = apiKey;
+    state.providers[parseInt(editIdx)].models = models;
+  } else {
+    // Add new
+    state.providers.push({
+      id: uid(), name: name, baseUrl: baseUrl,
+      apiKey: apiKey, models: models, createdAt: Date.now()
+    });
+  }
+  saveProviders();
+  renderProviderList();
+  renderModelSelector();
+  syncModelSelector();
+  closeProviderEditor();
+}
+
+function deleteProvider(idx) {
+  if (!confirm('确定删除接口「' + state.providers[idx].name + '」？')) return;
+  state.providers.splice(idx, 1);
+  saveProviders();
+  // Fix conversations referencing deleted provider
+  for (var conv of state.conversations) {
+    if (conv.providerId && !getProvider(conv.providerId)) {
+      conv.providerId = null;
+    }
+  }
+  save();
+  renderProviderList();
+  renderModelSelector();
+  syncModelSelector();
+}
+
+
 var _saveQueue = Promise.resolve();
 function save() {
   const conv = state.conversations.find(c => c.id === state.currentId);
@@ -226,7 +512,8 @@ function newConversation() {
   return {
     id: uid(),
     title: '新对话',
-    model: 'deepseek-v4-flash',
+    model: (state.providers && state.providers[0] && state.providers[0].models && state.providers[0].models[0]) || 'deepseek-v4-flash',
+    providerId: (state.providers && state.providers[0] && state.providers[0].id) || null,
     thinkingEnabled: settings.thinkingEnabled,
     systemPrompt: '',
     userIdentity: '',
@@ -352,7 +639,7 @@ const sidebar = $('sidebar');
 const thinkingToggle = $('thinking-toggle');
 const systemPromptInput = $('system-prompt');
 const userIdentityInput = $('user-identity');
-const apiKeyInput = $('api-key-input');
+const apiKeyInput = null; // deprecated, providers managed separately
 
 // ===== Init =====
 async function init() {
@@ -367,19 +654,13 @@ async function init() {
     }
   }
 
-  // Load model list from server
-  try {
-    const resp = await fetch('/api/config');
-    const cfg = await resp.json();
-    modelSelect.innerHTML = (cfg.models || ['deepseek-v4-flash', 'deepseek-v4-pro'])
-      .map(m => `<option value="${m}">${m}</option>`).join('');
-  } catch(e) {
-    modelSelect.innerHTML = '<option value="deepseek-v4-flash">deepseek-v4-flash</option><option value="deepseek-v4-pro">deepseek-v4-pro</option>';
-  }
+  // Load providers from IndexedDB
+  await loadProviders();
+  migrateOldApiKey();
+  renderModelSelector();
 
   // Apply settings to UI
   thinkingToggle.checked = settings.thinkingEnabled;
-  apiKeyInput.value = settings.apiKey || '';
   applyDisplaySettings();
 
   // Thinking toggle auto-saves immediately
@@ -394,6 +675,7 @@ async function init() {
   });
 
   restoreConversationState();
+  syncModelSelector();
   renderSidebar();
   renderMessages();
   applyBackgroundImage();
@@ -473,7 +755,14 @@ async function init() {
   // Model change
   modelSelect.addEventListener('change', () => {
     const conv = currentConv();
-    if (conv) { conv.model = modelSelect.value; save(); }
+    if (conv) {
+      const parts = modelSelect.value.split(':');
+      if (parts.length >= 2) {
+        conv.providerId = parts[0];
+        conv.model = parts.slice(1).join(':');
+      }
+      save();
+    }
   });
 
   // Background image
@@ -614,6 +903,13 @@ async function init() {
     }
   });
 
+  // Provider management
+  $('btn-add-provider').addEventListener('click', function() { openProviderEditor(-1); });
+  $('btn-close-provider-editor').addEventListener('click', closeProviderEditor);
+  $('btn-test-provider').addEventListener('click', testProviderConnection);
+  $('btn-save-provider').addEventListener('click', saveProviderFromEditor);
+  renderProviderList();
+
   // Enable send button on init
   updateSendButton();
 }
@@ -630,11 +926,6 @@ function restoreConversationState() {
     state.conversations.push(conv);
     state.currentId = conv.id;
     save();
-  }
-  // Set model selector
-  const conv = currentConv();
-  if (conv) {
-    modelSelect.value = conv.model || 'deepseek-v4-flash';
   }
 }
 
@@ -860,7 +1151,7 @@ function renderSidebar() {
       renderSidebar();
       renderMessages();
       applyBackgroundImage();
-      modelSelect.value = currentConv()?.model || 'deepseek-v4-flash';
+      syncModelSelector();
     });
   });
 }
@@ -872,10 +1163,7 @@ function switchConversation(id) {
   renderSidebar();
   renderMessages();
   applyBackgroundImage();
-  const conv = currentConv();
-  if (conv) {
-    modelSelect.value = conv.model || 'deepseek-v4-flash';
-  }
+  syncModelSelector();
 }
 
 function newChat() {
@@ -888,8 +1176,8 @@ function newChat() {
   save();
   renderSidebar();
   renderMessages();
+  syncModelSelector();
   applyBackgroundImage();
-  modelSelect.value = conv.model;
   chatInput.focus();
 }
 
@@ -1327,7 +1615,7 @@ async function sendMessage() {
     wordCount: countWords(text),
     versions: [{ content: text, timestamp: Date.now(), reason: 'original' }],
     activeVersion: 0,
-    files: files.map(f => ({ name: f.name, type: f.type, content: f.content.slice(0, 500000), size: f.size })),
+    files: files.map(f => ({ name: f.name, type: f.type, content: f.isImage ? f.content : f.content.slice(0, 500000), isImage: f.isImage, base64: f.base64, mimeType: f.mimeType, size: f.size })),
     createdAt: Date.now()
   };
 
@@ -1380,16 +1668,8 @@ function buildContext(conv) {
     if (!m || m.role === 'system') continue;
     let content = m.content;
 
-    // Include file content for user messages
-    if (m.files && m.files.length > 0 && m.role === 'user') {
-      const fileContext = m.files.map(f => `--- ${f.name} ---\n${f.content}`).join('\n\n');
-      if (m.content) {
-        content = `用户附带了以下文件内容：\n${fileContext}\n\n用户消息：\n${m.content}`;
-      } else {
-        content = `用户附带了以下文件内容：\n${fileContext}`;
-      }
-    }
-
+    // Process files (text and images)
+    content = buildFileContent(m);
     msgs.push({ role: m.role, content });
 
     // Mid-context injection: remind every 4 messages
@@ -1449,13 +1729,19 @@ async function sendFromMessage(context) {
   }
 
   try {
-    // Auto-detect: if NOT on localhost/127.0.0.1, use direct mode
+    // Provider routing
+  var provider = getProvider(conv.providerId);
+  if (!provider) {
+    assistantMsg.content = '**错误：** 请先在设置中添加接口';
+    save(); renderMessages(); state.loading = false;
+    toggleSendStop(); scrollToBottom(); return;
+  }
   var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
   var useDirect = settings.directMode || !isLocal;
   var apiUrl = useDirect
-    ? 'https://api.deepseek.com/v1/chat/completions'
+    ? provider.baseUrl + '/chat/completions'
     : '/api/chat/completions';
-  var apiKey = settings.apiKey || settings.directKey || '';
+  var apiKey = provider.apiKey;
   if (useDirect && !apiKey) {
     assistantMsg.content = '**错误：** 直连模式需要设置 API 密钥';
     save(); renderMessages(); state.loading = false;
@@ -1465,12 +1751,15 @@ async function sendFromMessage(context) {
   if (useDirect) reqHeaders['Authorization'] = 'Bearer ' + apiKey;
   var reqBody = {
     messages: context,
-    model: conv.model || modelSelect.value,
+    model: conv.model,
     stream: true,
     thinkingEnabled: conv.thinkingEnabled !== false
   };
-  if (!useDirect) reqBody.apiKey = apiKey || undefined;
-  // Direct mode: apply thinking toggle (server usually does this)
+  if (!useDirect) {
+    reqBody.baseUrl = provider.baseUrl;
+    reqBody.apiKey = apiKey;
+  }
+  // Direct mode: apply thinking toggle
   var shouldDisableThinking = conv.thinkingEnabled === false;
   if (useDirect) {
     if (shouldDisableThinking) {
@@ -1513,8 +1802,9 @@ async function sendFromMessage(context) {
           const json = JSON.parse(data);
           const delta = json.choices?.[0]?.delta;
           if (delta) {
-            if (delta.reasoning_content) {
-              fullReasoning += delta.reasoning_content;
+            var reasoningText = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
+            if (reasoningText) {
+              fullReasoning += reasoningText;
               assistantMsg.reasoningContent = fullReasoning;
             }
             if (delta.content) {
@@ -1605,12 +1895,7 @@ function buildContextForContinue(conv, targetMsg) {
   for (const m of chain) {
     if (!m || m.role === 'system') continue;
     let content = m.content;
-    if (m.files && m.files.length > 0 && m.role === 'user') {
-      const fileContext = m.files.map(f => `--- ${f.name} ---\n${f.content}`).join('\n\n');
-      content = m.content
-        ? `用户附带了以下文件内容：\n${fileContext}\n\n用户消息：\n${m.content}`
-        : `用户附带了以下文件内容：\n${fileContext}`;
-    }
+    content = buildFileContent(m);
     msgs.push({ role: m.role, content });
 
     // Mid-context injection: remind every 4 messages
@@ -1649,12 +1934,18 @@ async function sendFromMessageContinue(context, assistantMsg) {
   if (lastMsgEl) lastMsgEl.classList.add('cursor-blink');
 
   try {
+    var provider = getProvider(conv.providerId);
+    if (!provider) {
+      assistantMsg.content = existingContent + '\n\n**错误：** 请先在设置中添加接口';
+      save(); renderMessages(); state.loading = false;
+      toggleSendStop(); scrollToBottom(); return;
+    }
     var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
     var useDirect = settings.directMode || !isLocal;
     var apiUrl = useDirect
-      ? 'https://api.deepseek.com/v1/chat/completions'
+      ? provider.baseUrl + '/chat/completions'
       : '/api/chat/completions';
-    var apiKey = settings.apiKey || settings.directKey || '';
+    var apiKey = provider.apiKey;
     if (useDirect && !apiKey) {
       assistantMsg.content = existingContent + '\n\n**错误：** 直连模式需要设置 API 密钥';
       save(); renderMessages(); state.loading = false;
@@ -1664,11 +1955,14 @@ async function sendFromMessageContinue(context, assistantMsg) {
     if (useDirect) reqHeaders['Authorization'] = 'Bearer ' + apiKey;
     var reqBody = {
       messages: context,
-      model: conv.model || modelSelect.value,
+      model: conv.model,
       stream: true,
       thinkingEnabled: conv.thinkingEnabled !== false
     };
-    if (!useDirect) reqBody.apiKey = apiKey || undefined;
+    if (!useDirect) {
+      reqBody.baseUrl = provider.baseUrl;
+      reqBody.apiKey = apiKey;
+    }
     var shouldDisableThinking = conv.thinkingEnabled === false;
     if (useDirect) {
       if (shouldDisableThinking) reqBody.thinking = { type: 'disabled' };
@@ -1709,8 +2003,9 @@ async function sendFromMessageContinue(context, assistantMsg) {
           const json = JSON.parse(data);
           const delta = json.choices?.[0]?.delta;
           if (delta) {
-            if (delta.reasoning_content) {
-              fullReasoning += delta.reasoning_content;
+            var reasoningText2 = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
+            if (reasoningText2) {
+              fullReasoning += reasoningText2;
               assistantMsg.reasoningContent = fullReasoning;
             }
             if (delta.content) {
@@ -2274,18 +2569,36 @@ function handleFileUpload(e) {
   if (!files.length) return;
 
   for (const file of files) {
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const content = ev.target.result;
-      state.pendingFiles.push({
-        name: file.name,
-        type: file.type || 'text/plain',
-        content: content,
-        size: file.size
+    if (file.type.startsWith('image/')) {
+      // Image: compress + base64
+      compressImageForUpload(file).then(function(dataUrl) {
+        var base64 = dataUrl.split(',')[1];
+        state.pendingFiles.push({
+          name: file.name,
+          type: file.type,
+          isImage: true,
+          base64: base64,
+          mimeType: file.type,
+          content: base64,
+          size: file.size
+        });
+        renderFilePreview();
       });
-      renderFilePreview();
-    };
-    reader.readAsText(file);
+    } else {
+      // Text: read as text
+      var reader = new FileReader();
+      reader.onload = function(ev) {
+        state.pendingFiles.push({
+          name: file.name,
+          type: file.type || 'text/plain',
+          isImage: false,
+          content: ev.target.result,
+          size: file.size
+        });
+        renderFilePreview();
+      };
+      reader.readAsText(file);
+    }
   }
   fileInput.value = '';
 }
@@ -2296,11 +2609,16 @@ function renderFilePreview() {
     return;
   }
   filePreview.style.display = 'flex';
-  filePreview.innerHTML = state.pendingFiles.map((f, i) =>
-    `<span class="file-tag">${escapeHtml(f.name)} (${formatSize(f.size)})
-      <button class="remove-file" data-idx="${i}">✕</button>
-    </span>`
-  ).join('');
+  filePreview.innerHTML = state.pendingFiles.map((f, i) => {
+    if (f.isImage) {
+      return '<span class="file-tag file-tag-image">' +
+        '<img src="data:' + f.mimeType + ';base64,' + f.base64 + '" class="file-thumb" />' +
+        escapeHtml(f.name) +
+        '<button class="remove-file" data-idx="' + i + '">✕</button></span>';
+    }
+    return '<span class="file-tag">' + escapeHtml(f.name) + ' (' + formatSize(f.size) + ')' +
+      '<button class="remove-file" data-idx="' + i + '">✕</button></span>';
+  }).join('');
 
   filePreview.querySelectorAll('.remove-file').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -2327,12 +2645,12 @@ function toggleSettings(open) {
   state.settingsOpen = open;
   settingsPanel.style.display = open ? 'flex' : 'none';
   if (open) {
+    renderProviderList();
     const conv = currentConv();
     thinkingToggle.checked = conv ? conv.thinkingEnabled : settings.thinkingEnabled;
     systemPromptInput.value = conv?.systemPrompt || '';
     $('emphasis-prompt').value = conv?.emphasis || '';
     userIdentityInput.value = conv?.userIdentity || '';
-    apiKeyInput.value = settings.apiKey || '';
     // Display settings
     const fsSelect = document.getElementById('font-size-select');
     const lsSelect = document.getElementById('line-spacing-select');
@@ -2351,7 +2669,6 @@ function toggleSettings(open) {
 
 function saveSettingsHandler() {
   settings.thinkingEnabled = thinkingToggle.checked;
-  settings.apiKey = apiKeyInput.value.trim();
   // Display settings
   const fsSelect = document.getElementById('font-size-select');
   const lsSelect = document.getElementById('line-spacing-select');
@@ -2499,7 +2816,13 @@ function importConversation(e) {
       save();
       renderSidebar();
       renderMessages();
-      if (conv.model) modelSelect.value = conv.model;
+      // Match provider for imported conversation
+      if (!conv.providerId && conv.model) {
+        var matched = state.providers.find(function(p) { return p.models && p.models.includes(conv.model); });
+        if (matched) conv.providerId = matched.id;
+        else if (state.providers.length > 0) { conv.providerId = state.providers[0].id; }
+      }
+      syncModelSelector();
     } catch (err) {
       alert('文件解析失败: ' + err.message);
     }
@@ -2671,6 +2994,7 @@ window.__debugConv = function(id) {
   return {
     id: conv.id,
     title: conv.title,
+    providerId: conv.providerId,
     model: conv.model,
     rootId: conv.rootId,
     activePath: conv.activePath,
