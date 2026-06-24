@@ -33,12 +33,15 @@ app.use((req, res, next) => {
 app.post('/api/chat/completions', async (req, res) => {
   const {
     messages,
-    model = config.defaultModel,
-    apiKey = config.apiKey,
-    apiBaseUrl = config.apiBaseUrl,
+    model,
+    apiKey: reqApiKey,
+    baseUrl: reqBaseUrl,
     stream = true,
     thinkingEnabled = true
   } = req.body;
+  // Client sends baseUrl + apiKey; fallback to server config for backward compat
+  const apiKey = reqApiKey || config.apiKey;
+  const apiBaseUrl = reqBaseUrl || config.apiBaseUrl;
 
   if (!apiKey) {
     return res.status(400).json({ error: 'API key not configured.' });
@@ -48,7 +51,7 @@ app.post('/api/chat/completions', async (req, res) => {
   }
 
   const payload = {
-    model,
+    model: model || config.defaultModel,
     messages,
     stream: true,
     max_tokens: config.maxTokens || 4096,

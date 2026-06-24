@@ -270,3 +270,28 @@ body.dark .interrupted-reason{color:#fbbf24}
 body.dark .status-bar{
   background:rgba(96,165,250,.08);border-color:rgba(96,165,250,.2);
 }
+
+/* ===== Model selector optgroup ===== */
+.model-select optgroup{font-weight:700;color:var(--text);font-style:normal}
+.model-select option{font-weight:400;color:var(--text);padding-left:16px}
+
+/* ===== Provider management ===== */
+.provider-list{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.provider-empty{color:var(--text2);font-size:13px;padding:8px 0}
+.provider-item{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.provider-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.provider-name{font-weight:600;font-size:14px}
+.provider-actions{display:flex;gap:6px}
+.provider-detail{display:flex;flex-direction:column;gap:2px}
+.provider-url{font-size:12px;color:var(--text2);word-break:break-all}
+.provider-models{font-size:12px;color:var(--text2)}
+.provider-editor{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:8px}
+.provider-editor-actions{display:flex;align-items:center;gap:8px;margin:8px 0}
+.provider-test-result{font-size:12px}
+.provider-test-result.success{color:#22c55e}
+.provider-test-result.error{color:#ef4444}
+.provider-test-result.warn{color:#eab308}
+
+/* ===== Image thumbnail in file preview ===== */
+.file-tag-image{display:inline-flex;align-items:center;gap:6px}
+.file-thumb{width:48px;height:48px;object-fit:cover;border-radius:4px;border:1px solid var(--border)}
