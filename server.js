@@ -39,8 +39,8 @@ app.post('/api/chat/completions', async (req, res) => {
     stream = true,
     thinkingEnabled = true
   } = req.body;
-  // Client sends baseUrl + apiKey; fallback to server config for backward compat
-  const apiKey = reqApiKey || config.apiKey;
+  // Client sends baseUrl + apiKey; fallback to env var or server config
+  const apiKey = reqApiKey || process.env.API_KEY || config.apiKey;
   const apiBaseUrl = reqBaseUrl || config.apiBaseUrl;
 
   if (!apiKey) {
