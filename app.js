@@ -1293,6 +1293,18 @@ function renderMessages() {
     }
   });
 
+  // Render LaTeX formulas
+  if (typeof renderMathInElement !== 'undefined') {
+    renderMathInElement(messagesEl, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '$', right: '$', display: false},
+        {left: '\\(', right: '\\)', display: false},
+        {left: '\\[', right: '\\]', display: true}
+      ],
+      throwOnError: false
+    });
+  }
   scrollToBottom();
 }
 
@@ -2082,6 +2094,18 @@ function updateMessageContent(msgId, content, reasoning) {
     }
   });
 
+  // Render LaTeX formulas
+  if (typeof renderMathInElement !== 'undefined') {
+    renderMathInElement(contentEl, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '$', right: '$', display: false},
+        {left: '\\(', right: '\\)', display: false},
+        {left: '\\[', right: '\\]', display: true}
+      ],
+      throwOnError: false
+    });
+  }
   scrollToBottom();
 }
 
