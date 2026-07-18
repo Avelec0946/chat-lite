@@ -74,7 +74,9 @@ function getProvider(id) {
 
 function normalizeBaseUrl(url) {
   url = (url || '').trim().replace(/\/+$/, '');
-  if (!url.endsWith('/v1')) url += '/v1';
+  // 已经包含版本路径段（/v1, /v2, /v4 等）就不再强制加 /v1
+  // 否则会把 GLM 的 /v4 改成 /v4/v1 导致 404
+  if (!/\/v\d+$/i.test(url)) url += '/v1';
   return url;
 }
 
