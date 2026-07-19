@@ -241,6 +241,15 @@ function buildUpstreamPayload(provider, body) {
   }
 
   var payload = Object.assign({}, body);
+  // Convert thinkingEnabled flag to thinking field for platforms that support it
+  if (p.features.supportsThinking) {
+    if (payload.thinkingEnabled === false) {
+      payload.thinking = { type: 'disabled' };
+    } else {
+      // Explicitly enable (or let API default)
+      delete payload.thinking;
+    }
+  }
   delete payload.thinkingEnabled;
   delete payload.apiVersion;
   delete payload.provider;
