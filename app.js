@@ -1904,8 +1904,31 @@ function deleteMessage(msgId) {
     delete conv.messageMap[id];
   });
 
-  // Remove deleted ids from active path
-  conv.activePath = conv.activePath.filter(id => !idsToDelete.has(id));
+  // Rebuild activePath: find the deletion point and try to switch to a sibling
+  const deleteIdx = conv.activePath.indexOf(msgId);
+  if (deleteIdx >= 0) {
+    // Truncate activePath to just before the deleted message
+    conv.activePath = conv.activePath.slice(0, deleteIdx);
+
+    // If parent has remaining children, switch to the first available sibling
+    if (parent && parent.children && parent.children.length > 0) {
+      const newChildId = parent.children[0];
+      // Walk down the first-child chain to rebuild a complete activePath
+      let cursor = newChildId;
+      while (cursor) {
+        conv.activePath.push(cursor);
+        const cursorNode = conv.messageMap[cursor];
+        cursor = (cursorNode && cursorNode.children && cursorNode.children.length > 0)
+          ? cursorNode.children[0]
+          : null;
+      }
+    }
+  } else {
+    // Deleted message was not on active path, just filter out any deleted ids
+    conv.activePath = conv.activePath.filter(id => !idsToDelete.has(id));
+  }
+
+  // Safety fallback
   if (conv.activePath.length === 0) {
     conv.activePath = [conv.rootId];
   }
