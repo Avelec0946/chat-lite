@@ -11,6 +11,19 @@ const state = {
 const STORAGE_KEY = 'chatlite_data';
 const SETTINGS_KEY = 'chatlite_settings';
 
+// ===== Flat SVG Icons (stroke-based, consistent with toolbar) =====
+const ICON = {
+  user: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg>',
+  bot: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><rect x="4" y="8" width="16" height="12" rx="2"/><line x1="12" y1="4" x2="12" y2="8"/><circle cx="9" cy="14" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="14" r="1" fill="currentColor" stroke="none"/></svg>',
+  edit: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
+  palette: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><circle cx="8.5" cy="10.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="10.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="15" r="1.2" fill="currentColor" stroke="none"/></svg>',
+  trash: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  ban: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>',
+  check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><polyline points="20 6 9 17 4 12"/></svg>',
+  warn: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  x: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+};
+
 // ===== IndexedDB (replaces localStorage for large data) =====
 const IDB_NAME = 'chatlite_db';
 const IDB_VER = 1;
@@ -485,14 +498,14 @@ async function testProviderConnection() {
     var models = normalizeModels(data).map(function(m) { return m.id; });
     if (models.length > 0) {
       document.getElementById('provider-models-input').value = models.join(', ');
-      resultEl.textContent = '✅ 连接成功，发现 ' + models.length + ' 个模型';
+      resultEl.innerHTML = ICON.check + ' 连接成功，发现 ' + models.length + ' 个模型';
       resultEl.className = 'provider-test-result success';
     } else {
-      resultEl.textContent = '⚠️ 连接成功但未发现模型，请手动填写';
+      resultEl.innerHTML = ICON.warn + ' 连接成功但未发现模型，请手动填写';
       resultEl.className = 'provider-test-result warn';
     }
   } catch(e) {
-    resultEl.textContent = '❌ 连接失败: ' + e.message;
+    resultEl.innerHTML = ICON.x + ' 连接失败: ' + e.message;
     resultEl.className = 'provider-test-result error';
   }
 }
@@ -1415,7 +1428,7 @@ function renderBreadcrumb(conv) {
   let html = '';
   display.forEach((m, i) => {
     const label = m.title || m.content.substring(0, 20) + (m.content.length > 20 ? '...' : '') || '(空)';
-    const icon = m.role === 'user' ? '👤' : '🤖';
+    const icon = m.role === 'user' ? ICON.user : ICON.bot;
     const isLast = i === display.length - 1;
     // Show sibling count if this is the last node and parent has multiple children
     const children = m.children || [];
@@ -2500,7 +2513,7 @@ function renderSearchResults() {
   container.innerHTML = branchSearchResults.map((r, i) => {
     const conv = currentConv();
     const msg = conv?.messageMap?.[r.id];
-    const role = msg?.role === 'user' ? '👤' : '🤖';
+    const role = msg?.role === 'user' ? ICON.user : ICON.bot;
     const text = escapeHtml(r.text);
     const hl = text.replace(new RegExp(escapeRegex(query), 'gi'), m => `<mark class="result-highlight">${m}</mark>`);
     return `<div class="branch-search-result" data-idx="${i}" onclick="jumpToSearchResult(${i})">
@@ -2767,7 +2780,7 @@ function renderTreeSVG(conv) {
     if (!msg) continue;
     const isActive = conv.activePath.includes(nodeId);
     const hasChildren = (msg.children || []).length > 0;
-    const icon = msg.role === 'user' ? '👤' : '🤖';
+    const iconChar = msg.role === 'user' ? 'U' : 'A';
     const rawTitle = (msg.title || msg.content || '');
     const cleanTitle = (typeof rawTitle === 'string' ? rawTitle : '').replace(/\s+/g, ' ').trim() || '(空)';
     // Truncate by visual width: CJK ≈ 2 units, ASCII ≈ 1 unit
@@ -2788,9 +2801,11 @@ function renderTreeSVG(conv) {
         fill="${fillColor}" 
         stroke="${isActive ? 'var(--primary)' : 'var(--border)'}" 
         stroke-width="${isActive ? 1.5 : 1}" filter="url(#shadow)"/>
-      <text x="8" y="18" font-size="11" font-weight="${isActive ? 'bold' : 'normal'}" 
-        fill="${isActive ? '#fff' : 'var(--text)'}" font-family="inherit">${icon} ${escapeSvg(title)}</text>
-      <text x="8" y="36" font-size="10" fill="${isActive ? 'rgba(255,255,255,0.7)' : 'var(--text2)'}" font-family="inherit">${wc}字${hasChildren ? ' ▾' : ''}</text>
+      <circle cx="12" cy="14" r="5" fill="${msg.role === 'user' ? '#3b82f6' : '#10b981'}" opacity="${isActive ? 0.9 : 0.6}"/>
+      <text x="12" y="17" font-size="8" font-weight="bold" fill="#fff" text-anchor="middle" font-family="inherit">${iconChar}</text>
+      <text x="24" y="18" font-size="11" font-weight="${isActive ? 'bold' : 'normal'}" 
+        fill="${isActive ? '#fff' : 'var(--text)'}" font-family="inherit">${escapeSvg(title)}</text>
+      <text x="24" y="36" font-size="10" fill="${isActive ? 'rgba(255,255,255,0.7)' : 'var(--text2)'}" font-family="inherit">${wc}字${hasChildren ? ' ▾' : ''}</text>
     </g>`;
   }
   
@@ -2903,7 +2918,7 @@ function showTreeNodeMenu(event, nodeId) {
   // Rename option
   const renameBtn = document.createElement('div');
   renameBtn.className = 'tree-menu-item';
-  renameBtn.textContent = '✏️ 改名';
+  renameBtn.innerHTML = ICON.edit + ' 改名';
   renameBtn.addEventListener('click', function() {
     closeTreeNodeMenu();
     const newName = prompt('输入新名称:', msg.title || '');
@@ -2919,7 +2934,7 @@ function showTreeNodeMenu(event, nodeId) {
   // Color option
   const colorBtn = document.createElement('div');
   colorBtn.className = 'tree-menu-item';
-  colorBtn.textContent = '🎨 选色';
+  colorBtn.innerHTML = ICON.palette + ' 选色';
   colorBtn.addEventListener('click', function() {
     closeTreeNodeMenu();
     const colorList = NODE_COLORS.map((c,i) => `${i}. ${c.name}`).join('\n');
@@ -2940,7 +2955,7 @@ function showTreeNodeMenu(event, nodeId) {
   if (!isRoot) {
     const delBtn = document.createElement('div');
     delBtn.className = 'tree-menu-item tree-menu-danger';
-    delBtn.textContent = '🗑️ 删除';
+    delBtn.innerHTML = ICON.trash + ' 删除';
     delBtn.addEventListener('click', function() {
       closeTreeNodeMenu();
       if (confirm('确定删除这条消息及其所有分支吗？')) {
@@ -2952,7 +2967,7 @@ function showTreeNodeMenu(event, nodeId) {
   } else {
     const rootHint = document.createElement('div');
     rootHint.className = 'tree-menu-item tree-menu-disabled';
-    rootHint.textContent = '🚫 根节点不可删除';
+    rootHint.innerHTML = ICON.ban + ' 根节点不可删除';
     menu.appendChild(rootHint);
   }
 
