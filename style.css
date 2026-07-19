@@ -125,7 +125,11 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .msg-action-btn{background:none;border:none;color:var(--text2);cursor:pointer;font-size:13px;padding:2px 6px;border-radius:4px}
 .msg-action-btn:hover{background:var(--bg3);color:var(--text)}
 .msg-action-btn.delete-btn:hover{background:var(--danger,#ff4d4f);color:#fff}
-.message.msg-selected .msg-bubble{box-shadow:0 0 0 2px var(--primary);-webkit-tap-highlight-color:transparent}
+.message.msg-selected .msg-bubble{box-shadow:0 0 0 3px var(--primary),0 0 12px rgba(124,58,237,0.35);-webkit-tap-highlight-color:transparent}
+.message.user.msg-selected .msg-bubble{background:var(--primary);color:#fff}
+.message.user.msg-selected .msg-actions,.message.user.msg-selected .msg-title{color:#fff}
+.message.user.msg-selected .msg-action-btn{color:#fff}
+.message.user.msg-selected .msg-action-btn:hover{background:rgba(255,255,255,0.25);color:#fff}
 .msg-bubble{-webkit-touch-callout:none;-webkit-user-select:text;user-select:text}
 /* Edit mode */
 .edit-wrap{position:relative}
