@@ -5,6 +5,7 @@ const state = {
   loading: false,
   abortController: null,
   settingsOpen: false,
+  selectedMsgId: null,
 };
 
 const STORAGE_KEY = 'chatlite_data';
@@ -1105,10 +1106,14 @@ async function init() {
   }, { passive: false });
   document.addEventListener('touchend', () => endHold());
 
-  // Click elsewhere to dismiss long-press
+  // Click elsewhere to dismiss long-press / message selection
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.conv-item')) {
       convList.querySelectorAll('.conv-item.long-press').forEach(el => el.classList.remove('long-press'));
+    }
+    if (state.selectedMsgId && !e.target.closest('.message')) {
+      state.selectedMsgId = null;
+      renderMessages();
     }
   });
 
@@ -1453,11 +1458,13 @@ function renderMessages() {
 
   displayMsgs.forEach((msg, idx) => {
     const isLastMsg = idx === displayMsgs.length - 1;
+    const isSelected = state.selectedMsgId === msg.id;
     const div = document.createElement('div');
-    div.className = `message ${msg.role}${msg.editing ? ' message-editing' : ''}`;
+    div.className = `message ${msg.role}${msg.editing ? ' message-editing' : ''}${isSelected ? ' msg-selected' : ''}`;
     div.dataset.id = msg.id;
 
     const content = msg.editing ? renderEditMode(msg) : renderContent(msg);
+    const deleteBtnHtml = `<button class="msg-action-btn delete-btn" title="删除">删除</button>`;
 
     div.innerHTML = `
       <div class="msg-bubble">
@@ -1469,22 +1476,34 @@ function renderMessages() {
           <button class="msg-action-btn edit-btn" title="编辑">编辑</button>
           <button class="msg-action-btn regenerate-btn" title="重新生成" ${state.loading ? 'disabled' : ''}>重试</button>
           <button class="msg-action-btn copy-btn" title="复制全文">复制</button>
+          ${deleteBtnHtml}
         </div>` : ''}
         ${msg.role === 'user' && !msg.editing && !msg.isFileOnly ? `
         <div class="msg-actions">
           <button class="msg-action-btn edit-btn" title="编辑">编辑</button>
           <button class="msg-action-btn copy-btn" title="复制全文">复制</button>
+          ${deleteBtnHtml}
         </div>` : ''}
       </div>
     `;
 
     messagesEl.appendChild(div);
 
+    const bubble = div.querySelector('.msg-bubble');
+    addLongPress(bubble, () => {
+      state.selectedMsgId = msg.id;
+      renderMessages();
+    });
+    bubble.addEventListener('contextmenu', (e) => e.preventDefault());
+
     const editBtn = div.querySelector('.edit-btn');
     if (editBtn) editBtn.addEventListener('click', () => enterEditMode(msg.id));
 
     const regenBtn = div.querySelector('.regenerate-btn');
     if (regenBtn) regenBtn.addEventListener('click', () => regenerate(msg.id));
+
+    const deleteBtn = div.querySelector('.delete-btn');
+    if (deleteBtn) deleteBtn.addEventListener('click', () => deleteMessage(msg.id));
 
     const copyBtn = div.querySelector('.copy-btn');
     if (copyBtn) copyBtn.addEventListener('click', () => {
@@ -1512,6 +1531,48 @@ function renderMessages() {
   });
 
   scrollToBottom();
+}
+
+// ===== Long press helper =====
+function addLongPress(el, callback) {
+  let timer = null;
+  let startX = 0;
+  let startY = 0;
+  const threshold = 600; // ms
+  const moveThreshold = 15; // px
+
+  const start = (e) => {
+    const touch = e.touches ? e.touches[0] : e;
+    startX = touch.clientX;
+    startY = touch.clientY;
+    timer = setTimeout(() => {
+      timer = null;
+      callback();
+    }, threshold);
+  };
+
+  const cancel = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  const move = (e) => {
+    if (!timer) return;
+    const touch = e.touches ? e.touches[0] : e;
+    if (Math.abs(touch.clientX - startX) > moveThreshold || Math.abs(touch.clientY - startY) > moveThreshold) {
+      cancel();
+    }
+  };
+
+  el.addEventListener('mousedown', start);
+  el.addEventListener('touchstart', start, { passive: true });
+  el.addEventListener('mouseup', cancel);
+  el.addEventListener('mouseleave', cancel);
+  el.addEventListener('touchmove', move, { passive: true });
+  el.addEventListener('touchend', cancel);
+  el.addEventListener('touchcancel', cancel);
 }
 
 // Sibling navigation (branch switching)
@@ -1806,6 +1867,60 @@ async function regenerate(msgId) {
 
   const context = buildContext(conv);
   await sendFromMessage(context);
+}
+
+// ===== Delete Message =====
+function deleteMessage(msgId) {
+  const conv = currentConv();
+  if (!conv || !conv.messageMap || !conv.messageMap[msgId]) return;
+
+  const msg = getMsg(conv, msgId);
+  if (!msg || !msg.parentId) {
+    showToast('根节点不能删除', 'warn');
+    return;
+  }
+
+  if (!confirm('确定删除这条消息及其所有分支吗？')) return;
+
+  // Collect all descendants to delete
+  const idsToDelete = new Set();
+  function collect(id) {
+    idsToDelete.add(id);
+    const node = conv.messageMap[id];
+    if (node && node.children) {
+      node.children.forEach(collect);
+    }
+  }
+  collect(msgId);
+
+  // Remove from parent's children list
+  const parent = getMsg(conv, msg.parentId);
+  if (parent && parent.children) {
+    parent.children = parent.children.filter(id => !idsToDelete.has(id));
+  }
+
+  // Delete nodes from messageMap
+  idsToDelete.forEach(id => {
+    delete conv.messageMap[id];
+  });
+
+  // Remove deleted ids from active path
+  conv.activePath = conv.activePath.filter(id => !idsToDelete.has(id));
+  if (conv.activePath.length === 0) {
+    conv.activePath = [conv.rootId];
+  }
+
+  // If streaming is tied to a deleted message, stop loading state
+  if (state.loading && state.abortController) {
+    state.abortController.abort();
+    state.loading = false;
+    state.abortController = null;
+  }
+
+  state.selectedMsgId = null;
+  save();
+  renderMessages();
+  showToast('消息已删除');
 }
 
 // ===== Send Message =====
