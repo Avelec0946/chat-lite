@@ -256,6 +256,24 @@ body.dark .chat-bg::after{background:rgba(0,0,0,.35)}
   .input-area{padding:6px 10px 12px}
 }
 
+/* 触摸设备：设置栏窄屏适配（防止按钮被挤出去看不见） */
+@media (max-width: 768px), (pointer: coarse) {
+  .settings-bar {
+    overflow-x: auto;
+    overflow-y: visible;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    gap: 4px;
+    padding: 8px 12px;
+  }
+  .settings-bar::-webkit-scrollbar { display: none; }
+  .settings-bar .model-select {
+    max-width: 100px;
+    min-width: 60px;
+    flex: 0 1 100px;
+  }
+}
+
 /* ===== Interrupted Bar ===== */
 .interrupted-bar{
   display:flex;align-items:center;gap:8px;
