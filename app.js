@@ -2439,6 +2439,7 @@ function openBranchDrawer() {
   tree.innerHTML = renderTreeSVG(conv);
   applyBranchZoom();
   initPinchZoom();
+  bindTreeNodeLongPress();
 }
 
 let branchZoom = 1;
@@ -2782,7 +2783,7 @@ function renderTreeSVG(conv) {
     const by = pos.y - NODE_H/2;
     const fillColor = msg.color || (isActive ? 'var(--primary)' : 'var(--bg2)');
     
-    svg += `<g class="tree-node" onclick="svgNodeClick('${nodeId}')" oncontextmenu="event.preventDefault();svgNodeRename('${nodeId}')" transform="translate(${bx},${by})">
+    svg += `<g class="tree-node" onclick="svgNodeClick('${nodeId}')" oncontextmenu="event.preventDefault();svgNodeMenu(event,'${nodeId}')" data-node-id="${nodeId}" transform="translate(${bx},${by})">
       <rect x="0" y="0" width="${NODE_W}" height="${NODE_H}" rx="8" 
         fill="${fillColor}" 
         stroke="${isActive ? 'var(--primary)' : 'var(--border)'}" 
@@ -2879,6 +2880,122 @@ window.svgNodeRename = function(nodeId) {
     renderMessages();
   }
 };
+
+// ===== Branch tree node context menu =====
+window.svgNodeMenu = function(event, nodeId) {
+  showTreeNodeMenu(event, nodeId);
+};
+
+function showTreeNodeMenu(event, nodeId) {
+  const conv = currentConv();
+  if (!conv) return;
+  const msg = getMsg(conv, nodeId);
+  if (!msg) return;
+
+  // Remove any existing menu
+  closeTreeNodeMenu();
+
+  const isRoot = !msg.parentId;
+  const menu = document.createElement('div');
+  menu.id = 'tree-node-menu';
+  menu.className = 'tree-node-menu';
+
+  // Rename option
+  const renameBtn = document.createElement('div');
+  renameBtn.className = 'tree-menu-item';
+  renameBtn.textContent = '✏️ 改名';
+  renameBtn.addEventListener('click', function() {
+    closeTreeNodeMenu();
+    const newName = prompt('输入新名称:', msg.title || '');
+    if (newName !== null && newName.trim()) {
+      msg.title = newName.trim();
+      save();
+      openBranchDrawer();
+      renderMessages();
+    }
+  });
+  menu.appendChild(renameBtn);
+
+  // Color option
+  const colorBtn = document.createElement('div');
+  colorBtn.className = 'tree-menu-item';
+  colorBtn.textContent = '🎨 选色';
+  colorBtn.addEventListener('click', function() {
+    closeTreeNodeMenu();
+    const colorList = NODE_COLORS.map((c,i) => `${i}. ${c.name}`).join('\n');
+    const curIdx = msg.color ? NODE_COLORS.findIndex(c => c.value === msg.color) : 0;
+    const idx = prompt('选择颜色:\n' + colorList + '\n输入数字:', curIdx.toString());
+    if (idx !== null) {
+      const ci = parseInt(idx) || 0;
+      if (ci >= 0 && ci < NODE_COLORS.length) {
+        msg.color = NODE_COLORS[ci].value;
+        save();
+        openBranchDrawer();
+      }
+    }
+  });
+  menu.appendChild(colorBtn);
+
+  // Delete option (not for root)
+  if (!isRoot) {
+    const delBtn = document.createElement('div');
+    delBtn.className = 'tree-menu-item tree-menu-danger';
+    delBtn.textContent = '🗑️ 删除';
+    delBtn.addEventListener('click', function() {
+      closeTreeNodeMenu();
+      if (confirm('确定删除这条消息及其所有分支吗？')) {
+        deleteMessage(nodeId);
+        openBranchDrawer();
+      }
+    });
+    menu.appendChild(delBtn);
+  } else {
+    const rootHint = document.createElement('div');
+    rootHint.className = 'tree-menu-item tree-menu-disabled';
+    rootHint.textContent = '🚫 根节点不可删除';
+    menu.appendChild(rootHint);
+  }
+
+  // Position menu at click point
+  let x, y;
+  if (event.touches && event.touches.length > 0) {
+    x = event.touches[0].clientX;
+    y = event.touches[0].clientY;
+  } else if (event.changedTouches && event.changedTouches.length > 0) {
+    x = event.changedTouches[0].clientX;
+    y = event.changedTouches[0].clientY;
+  } else {
+    x = event.clientX;
+    y = event.clientY;
+  }
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  document.body.appendChild(menu);
+
+  // Close on click outside
+  setTimeout(function() {
+    document.addEventListener('click', closeTreeNodeMenu, { once: true });
+  }, 50);
+}
+
+function closeTreeNodeMenu() {
+  const existing = document.getElementById('tree-node-menu');
+  if (existing) existing.remove();
+}
+
+// Bind long-press on tree nodes after render
+function bindTreeNodeLongPress() {
+  const nodes = document.querySelectorAll('.branch-svg .tree-node');
+  nodes.forEach(function(g) {
+    const nodeId = g.getAttribute('data-node-id');
+    if (!nodeId) return;
+    addLongPress(g, function(e) {
+      // Simulate event for positioning
+      const fakeEvent = { clientX: g.getBoundingClientRect().left + 40, clientY: g.getBoundingClientRect().top + 20 };
+      showTreeNodeMenu(fakeEvent, nodeId);
+    });
+  });
+}
 
 window.svgNodeColor = function(nodeId) {
   const conv = currentConv();
