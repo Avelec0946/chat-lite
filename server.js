@@ -120,17 +120,21 @@ function buildUpstreamRequest(provider, body) {
   }
 
   const payload = { ...body };
-  // Remove client-only control fields
+  // Convert thinkingEnabled flag to thinking field
+  // Respect user's explicit choice: if they turned off thinking, send disabled flag
+  // even for platforms that don't natively support it (aggregators may forward it)
+  if (payload.thinkingEnabled === false) {
+    payload.thinking = { type: 'disabled' };
+  } else {
+    delete payload.thinking;
+  }
   delete payload.thinkingEnabled;
   delete payload.baseUrl;
   delete payload.apiKey;
   delete payload.provider;
   delete payload.apiVersion;
 
-  // Clean incompatible fields based on provider features
-  if (!p.features.supportsThinking) {
-    delete payload.thinking;
-  }
+  // Don't strip thinking field — let upstream API decide
   if (p.features.maxTokensField && p.features.maxTokensField !== 'max_tokens' && payload.max_tokens !== undefined) {
     payload[p.features.maxTokensField] = payload.max_tokens;
     delete payload.max_tokens;
@@ -178,8 +182,8 @@ app.post('/api/chat/completions', async (req, res) => {
       thinkingEnabled
     };
 
-    // Toggle thinking on/off (DeepSeek-compatible)
-    if (!thinkingEnabled && provider.features.supportsThinking) {
+    // Toggle thinking on/off — respect user's choice even for aggregators
+    if (!thinkingEnabled) {
       payload.thinking = { type: 'disabled' };
     }
 

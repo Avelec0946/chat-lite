@@ -241,19 +241,19 @@ function buildUpstreamPayload(provider, body) {
   }
 
   var payload = Object.assign({}, body);
-  // Convert thinkingEnabled flag to thinking field for platforms that support it
-  if (p.features.supportsThinking) {
-    if (payload.thinkingEnabled === false) {
-      payload.thinking = { type: 'disabled' };
-    } else {
-      // Explicitly enable (or let API default)
-      delete payload.thinking;
-    }
+  // Convert thinkingEnabled flag to thinking field
+  // Respect user's explicit choice: if they turned off thinking, send disabled flag
+  // even for platforms that don't natively support it (aggregators may forward it)
+  if (payload.thinkingEnabled === false) {
+    payload.thinking = { type: 'disabled' };
+  } else {
+    delete payload.thinking;
   }
   delete payload.thinkingEnabled;
   delete payload.apiVersion;
   delete payload.provider;
-  if (!p.features.supportsThinking) delete payload.thinking;
+  // Only strip thinking for platforms that DEFINITELY don't support it AND user didn't explicitly disable
+  // (keeps disabled flag for aggregators that might forward to DeepSeek-like models)
   if (p.features.maxTokensField && p.features.maxTokensField !== 'max_tokens' && payload.max_tokens !== undefined) {
     payload[p.features.maxTokensField] = payload.max_tokens;
     delete payload.max_tokens;
