@@ -313,3 +313,8 @@ body.dark .status-bar{
 /* ===== Image thumbnail in file preview ===== */
 .file-tag-image{display:inline-flex;align-items:center;gap:6px}
 .file-thumb{width:48px;height:48px;object-fit:cover;border-radius:4px;border:1px solid var(--border)}
+
+/* 导入模式选择器在设置面板里的对齐 */
+#import-mode-select {
+  margin-left: 8px;
+}

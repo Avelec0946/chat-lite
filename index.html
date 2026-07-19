@@ -283,6 +283,22 @@
           </div>
         </div>
         <div class="setting-divider"></div>
+        <span class="setting-section-title">数据管理（全量导出/导入）</span>
+        <span class="setting-hint">导出当前所有对话、接口配置和设置；可用于跨设备迁移数据（如迁移到 APK）。</span>
+        <div class="card-import-row" style="margin-top:8px">
+          <button id="btn-export-all" class="btn btn-small">导出全部数据</button>
+          <button id="btn-import-all" class="btn btn-small">导入全部数据</button>
+          <input type="file" id="import-all-file-input" accept=".json" style="display:none">
+        </div>
+        <label class="setting-row" style="margin-top:8px">
+          <span>导入模式</span>
+          <select id="import-mode-select" class="setting-select">
+            <option value="overwrite" selected>覆盖（推荐）</option>
+            <option value="merge">合并（按 ID 去重）</option>
+          </select>
+        </label>
+        <span class="setting-hint">覆盖：直接替换当前所有数据。合并：相同 ID 的对话/接口以导入数据为准。</span>
+        <div class="setting-divider"></div>
         <span class="setting-section-title">显示</span>
       </div>
       <div class="settings-footer">

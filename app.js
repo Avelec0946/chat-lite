@@ -876,6 +876,7 @@ const apiKeyInput = null; // deprecated, providers managed separately
 // ===== Init =====
 async function init() {
   await loadData(); // IndexedDB (async)
+  state._dataLoaded = true;
   state.deletedIds = state.deletedIds || [];
   // Server is source of truth — always prefer server data
   await loadFromServer();
@@ -970,6 +971,13 @@ async function init() {
   $('btn-export').addEventListener('click', exportConversation);
   $('btn-import').addEventListener('click', () => { document.getElementById('import-file-input').click(); });
   document.getElementById('import-file-input').addEventListener('change', importConversation);
+  // 全量导出/导入按钮
+  var btnExportAll = document.getElementById('btn-export-all');
+  if (btnExportAll) btnExportAll.addEventListener('click', exportAllData);
+  var btnImportAll = document.getElementById('btn-import-all');
+  if (btnImportAll) btnImportAll.addEventListener('click', () => { document.getElementById('import-all-file-input').click(); });
+  var importAllInput = document.getElementById('import-all-file-input');
+  if (importAllInput) importAllInput.addEventListener('change', importAllDataFromFile);
   document.querySelector('#branch-drawer .branch-drawer-backdrop').addEventListener('click', closeBranchDrawer);
 
   $('btn-save-settings').addEventListener('click', saveSettingsHandler);
@@ -3243,6 +3251,117 @@ document.addEventListener('click', (e) => {
 });
 
 // ===== Import / Export =====
+
+// 等待 IndexedDB 数据加载完成
+async function ensureDataLoaded() {
+  if (state._dataLoaded) return;
+  let tries = 0;
+  while (!state._dataLoaded && tries < 50) {
+    await new Promise(r => setTimeout(r, 100));
+    tries++;
+  }
+}
+
+// 导出全部数据（对话 + Provider + 设置）
+async function exportAllData() {
+  await ensureDataLoaded();
+  const data = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    conversations: state.conversations,
+    providers: state.providers,
+    settings: settings,
+    currentId: state.currentId
+  };
+  const jsonText = JSON.stringify(data, null, 2);
+  const fileName = 'chat-lite-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+  const blob = new Blob([jsonText], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('已导出全部数据');
+}
+
+// 导入全部数据
+// mode: 'overwrite'（覆盖，默认）或 'merge'（按 ID 合并，冲突时导入数据优先）
+async function importAllData(jsonText, mode) {
+  await ensureDataLoaded();
+  mode = mode || 'overwrite';
+
+  let data;
+  try {
+    data = JSON.parse(jsonText);
+  } catch (e) {
+    showToast('JSON 解析失败：' + e.message);
+    return;
+  }
+  if (!data.conversations && !data.providers) {
+    showToast('文件格式不正确');
+    return;
+  }
+  if (data.version && data.version > 1) {
+    showToast('备份文件版本过高，可能不兼容');
+  }
+
+  const modeText = mode === 'merge' ? '合并' : '覆盖';
+  if (!confirm('即将以「' + modeText + '」方式导入数据。\n\n覆盖：直接替换当前所有数据\n合并：按 ID 去重，冲突时用导入数据替换本地\n\n确定继续吗？')) return;
+
+  if (mode === 'overwrite') {
+    if (data.conversations) state.conversations = data.conversations;
+    if (data.providers) state.providers = data.providers;
+    if (data.settings) {
+      Object.assign(settings, data.settings);
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    }
+    if (data.currentId) {
+      state.currentId = data.currentId;
+    } else {
+      state.currentId = state.conversations.length > 0 ? state.conversations[0].id : null;
+    }
+  } else {
+    if (data.conversations) {
+      const importedIds = new Set(data.conversations.map(c => c.id));
+      const kept = state.conversations.filter(c => !importedIds.has(c.id));
+      state.conversations = kept.concat(data.conversations);
+    }
+    if (data.providers) {
+      const importedPIds = new Set(data.providers.map(p => p.id));
+      const keptP = (state.providers || []).filter(p => !importedPIds.has(p.id));
+      state.providers = keptP.concat(data.providers);
+    }
+    if (data.settings) {
+      Object.assign(settings, data.settings);
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    }
+    if (!state.conversations.find(c => c.id === state.currentId)) {
+      state.currentId = state.conversations.length > 0 ? state.conversations[0].id : null;
+    }
+  }
+
+  save();
+  renderSidebar();
+  renderModelSelector();
+  if (state.currentId) renderMessages();
+  showToast('已' + modeText + '导入数据');
+}
+
+// 文件选择回调
+function importAllDataFromFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const modeEl = document.getElementById('import-mode-select');
+  const mode = modeEl ? modeEl.value : 'overwrite';
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    importAllData(ev.target.result, mode);
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
 function exportConversation() {
   const conv = currentConv();
   if (!conv) return;
