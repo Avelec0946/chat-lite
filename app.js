@@ -2780,13 +2780,28 @@ function exportConversation() {
   URL.revokeObjectURL(url);
 }
 
+// Tolerant JSON parse: handles truncated array exports that miss outer brackets
+function tryParseJSON(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    let fixed = raw.trim();
+    if (!fixed.startsWith('[')) fixed = '[' + fixed;
+    if (!fixed.endsWith(']')) {
+      fixed = fixed.replace(/,\s*$/, '');
+      fixed = fixed + ']';
+    }
+    return JSON.parse(fixed);
+  }
+}
+
 function importConversation(e) {
   const file = e.target.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = (ev) => {
     try {
-      const data = JSON.parse(ev.target.result);
+      const data = tryParseJSON(ev.target.result);
       let conv;
       
       // Format 1: chat-lite export
@@ -2802,7 +2817,11 @@ function importConversation(e) {
       else if (data.id && data.messageMap) {
         conv = data;
       }
-      // Format 4: old v1 linear array
+      // Format 4: 豆包/类角色平台导出的会话数组（每个元素含 conversation_id + messages）
+      else if (Array.isArray(data) && data.length > 0 && data[0].conversation_id && Array.isArray(data[0].messages)) {
+        conv = convertDoubao(data[0]);
+      }
+      // Format 5: old v1 linear array
       else if (data.messages && Array.isArray(data.messages)) {
         conv = { messages: data.messages };
         migrateV1toV2(conv);
@@ -2983,6 +3002,55 @@ function getBranchPathFromMap(map, rootId, leafId) {
     userIdentity: '',
     rootId,
     activePath: convActivePath,
+    messageMap,
+    createdAt: Date.now()
+  };
+}
+
+// Convert 豆包/类角色平台 export format to chat-lite tree
+function convertDoubao(convData) {
+  const messages = convData.messages || [];
+  const rootId = uid();
+  const rootMsg = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
+  const messageMap = { [rootId]: rootMsg };
+  const activePath = [rootId];
+  let parentId = rootId;
+
+  function createMsgNode(role, content) {
+    const text = String(content || '');
+    const node = {
+      id: uid(), role, content: text,
+      parentId,
+      children: [],
+      title: (role === 'user' ? (text.substring(0, 30) + (text.length > 30 ? '...' : '')) : '回复').replace(/\n/g, ' '),
+      wordCount: countWords(text),
+      versions: [{ content: text, timestamp: Date.now(), reason: 'import' }],
+      activeVersion: 0, files: [], createdAt: Date.now()
+    };
+    messageMap[node.id] = node;
+    messageMap[parentId].children.push(node.id);
+    parentId = node.id;
+    activePath.push(node.id);
+    return node.id;
+  }
+
+  for (const m of messages) {
+    if (m.content_type !== 'text') continue;
+    const text = String(m.show_content || '');
+    if (!text) continue;
+    const role = m.user_type === 'user' ? 'user' : 'assistant';
+    createMsgNode(role, text);
+  }
+
+  return {
+    id: uid(),
+    title: convData.conversation_name || convData.bot_name || '导入的对话',
+    model: '',
+    thinkingEnabled: true,
+    systemPrompt: '',
+    userIdentity: '',
+    rootId,
+    activePath,
     messageMap,
     createdAt: Date.now()
   };
