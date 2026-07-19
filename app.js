@@ -803,6 +803,12 @@ function applyBackgroundImage() {
     bgEl.style.backgroundImage = '';
     bgEl.classList.remove('active');
   }
+  const overlay = conv && conv.bgOverlay != null ? conv.bgOverlay : 0.3;
+  bgEl.style.setProperty('--bg-overlay', overlay);
+  const slider = document.getElementById('bg-overlay-slider');
+  const valueEl = document.getElementById('bg-overlay-value');
+  if (slider) slider.value = overlay;
+  if (valueEl) valueEl.textContent = Math.round(overlay * 100) + '%';
 }
 
 async function setBackgroundImage(file) {
@@ -1013,6 +1019,15 @@ async function init() {
     e.target.value = '';
   });
   $('btn-remove-bg').addEventListener('click', removeBackgroundImage);
+  $('bg-overlay-slider').addEventListener('input', (e) => {
+    const conv = currentConv();
+    if (!conv) return;
+    const val = parseFloat(e.target.value);
+    conv.bgOverlay = val;
+    document.getElementById('bg-overlay-value').textContent = Math.round(val * 100) + '%';
+    document.getElementById('chat-bg').style.setProperty('--bg-overlay', val);
+  });
+  $('bg-overlay-slider').addEventListener('change', () => { save(); });
 
   // Status bar toggle
   $('statusbar-toggle').addEventListener('change', function() {
