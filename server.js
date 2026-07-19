@@ -29,56 +29,175 @@ app.use((req, res, next) => {
   next();
 });
 
-// POST /api/chat/completions — proxy to DeepSeek API
+// Provider templates for third-party aggregation platforms
+const PROVIDER_TEMPLATES = {
+  openai: {
+    endpointPath: '/v1/chat/completions',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    modelsEndpoint: '/v1/models',
+    features: { supportsStreaming: true, supportsThinking: false, supportsVision: true, maxTokensField: 'max_tokens' }
+  },
+  deepseek: {
+    endpointPath: '/v1/chat/completions',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    modelsEndpoint: '/v1/models',
+    features: { supportsStreaming: true, supportsThinking: true, supportsVision: false, maxTokensField: 'max_tokens' }
+  },
+  azure: {
+    endpointPath: '/openai/deployments/{model}/chat/completions',
+    authType: 'api-key',
+    authHeader: 'api-key',
+    authPrefix: '',
+    modelsEndpoint: '/v1/models',
+    features: { supportsStreaming: true, supportsThinking: false, supportsVision: true, maxTokensField: 'max_tokens' }
+  },
+  custom: {
+    endpointPath: '/v1/chat/completions',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    modelsEndpoint: '/v1/models',
+    features: { supportsStreaming: true, supportsThinking: false, supportsVision: true, maxTokensField: 'max_tokens' }
+  }
+};
+
+function resolveTemplate(str, vars) {
+  return str.replace(/\{(\w+)\}/g, (m, k) => vars[k] !== undefined ? vars[k] : m);
+}
+
+function normalizeBaseUrl(url) {
+  return (url || '').replace(/\/+$/, '');
+}
+
+function normalizeProvider(provider) {
+  // Backwards compat: legacy requests send baseUrl + apiKey directly
+  if (!provider || typeof provider !== 'object') {
+    provider = {};
+  }
+  const templateKey = provider.template || 'openai';
+  const template = PROVIDER_TEMPLATES[templateKey] || PROVIDER_TEMPLATES.openai;
+  const baseUrl = normalizeBaseUrl(provider.baseUrl || config.apiBaseUrl || '');
+  const apiKey = provider.apiKey || process.env.API_KEY || config.apiKey;
+  return {
+    template: templateKey,
+    baseUrl,
+    endpointPath: provider.endpointPath || template.endpointPath,
+    apiKey,
+    authType: provider.authType || template.authType,
+    authHeader: provider.authHeader || template.authHeader,
+    authPrefix: provider.authPrefix !== undefined ? provider.authPrefix : template.authPrefix,
+    extraHeaders: provider.extraHeaders || {},
+    extraQuery: provider.extraQuery || {},
+    features: { ...template.features, ...(provider.features || {}) }
+  };
+}
+
+function buildUpstreamRequest(provider, body) {
+  const p = normalizeProvider(provider);
+  if (!p.baseUrl) throw new Error('Provider base URL is required.');
+  if (!p.apiKey) throw new Error('API key not configured.');
+
+  const url = new URL(resolveTemplate(p.endpointPath, {
+    model: body.model,
+    apiVersion: body.apiVersion || p.extraQuery['api-version'] || '2024-06-01'
+  }), p.baseUrl);
+
+  Object.entries(p.extraQuery || {}).forEach(([k, v]) => url.searchParams.set(k, v));
+
+  const headers = { 'Content-Type': 'application/json', ...(p.extraHeaders || {}) };
+  if (p.authType === 'bearer') {
+    headers[p.authHeader] = (p.authPrefix || 'Bearer ') + p.apiKey;
+  } else if (p.authType === 'api-key') {
+    headers[p.authHeader] = p.apiKey;
+  } else if (p.authType === 'header') {
+    headers[p.authHeader] = (p.authPrefix || '') + p.apiKey;
+  } else if (p.authType === 'query') {
+    url.searchParams.set(p.authHeader || 'api_key', p.apiKey);
+  }
+
+  const payload = { ...body };
+  // Remove client-only control fields
+  delete payload.thinkingEnabled;
+  delete payload.baseUrl;
+  delete payload.apiKey;
+  delete payload.provider;
+  delete payload.apiVersion;
+
+  // Clean incompatible fields based on provider features
+  if (!p.features.supportsThinking) {
+    delete payload.thinking;
+  }
+  if (p.features.maxTokensField && p.features.maxTokensField !== 'max_tokens' && payload.max_tokens !== undefined) {
+    payload[p.features.maxTokensField] = payload.max_tokens;
+    delete payload.max_tokens;
+  }
+
+  return { url: url.toString(), headers, payload };
+}
+
+// POST /api/chat/completions — proxy to upstream API (supports first-party & third-party platforms)
 app.post('/api/chat/completions', async (req, res) => {
   const {
     messages,
     model,
+    provider: reqProvider,
     apiKey: reqApiKey,
     baseUrl: reqBaseUrl,
     stream = true,
     thinkingEnabled = true
   } = req.body;
-  // Client sends baseUrl + apiKey; fallback to env var or server config
-  const apiKey = reqApiKey || process.env.API_KEY || config.apiKey;
-  const apiBaseUrl = reqBaseUrl || config.apiBaseUrl;
 
-  if (!apiKey) {
-    return res.status(400).json({ error: 'API key not configured.' });
-  }
-  if (!messages || !Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({ error: 'messages array is required.' });
-  }
-
-  const payload = {
-    model: model || config.defaultModel,
-    messages,
-    stream: true,
-    max_tokens: config.maxTokens || 4096,
-    temperature: config.temperature ?? 0.7,
-    ...config.extraParams
+  // Backwards compat: construct provider from legacy fields if needed
+  const providerConfig = reqProvider || {
+    baseUrl: reqBaseUrl || config.apiBaseUrl,
+    apiKey: reqApiKey,
+    template: 'openai'
   };
 
-  // Toggle thinking on/off
-  if (!thinkingEnabled) {
-    payload.thinking = { type: 'disabled' };
-  }
-
   try {
-    const response = await fetch(`${apiBaseUrl}/chat/completions`, {
+    const provider = normalizeProvider(providerConfig);
+
+    if (!provider.apiKey) {
+      return res.status(400).json({ error: 'API key not configured.' });
+    }
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages array is required.' });
+    }
+
+    const payload = {
+      model: model || config.defaultModel,
+      messages,
+      stream: true,
+      max_tokens: config.maxTokens || 4096,
+      temperature: config.temperature ?? 0.7,
+      ...config.extraParams,
+      thinkingEnabled
+    };
+
+    // Toggle thinking on/off (DeepSeek-compatible)
+    if (!thinkingEnabled && provider.features.supportsThinking) {
+      payload.thinking = { type: 'disabled' };
+    }
+
+    const { url, headers, payload: upstreamPayload } = buildUpstreamRequest(provider, payload);
+
+    console.log('Proxy upstream:', url, '(provider:', provider.template, ')');
+
+    const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(payload)
+      headers,
+      body: JSON.stringify(upstreamPayload)
     });
 
     // If error, forward the status and body
     if (!response.ok) {
       const errorText = await response.text();
       return res.status(response.status).json({
-        error: `DeepSeek API error (${response.status})`,
+        error: `Upstream API error (${response.status})`,
         detail: errorText
       });
     }

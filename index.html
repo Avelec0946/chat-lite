@@ -224,14 +224,59 @@
         <button id="btn-add-provider" class="btn btn-small" style="margin-bottom:8px">+ 添加接口</button>
         <div id="provider-list" class="provider-list"></div>
         <div id="provider-editor" class="provider-editor" style="display:none">
-          <label class="card-field"><span>接口名称</span><input id="provider-name-input" class="card-input" placeholder="如：小米 Token Plan"></label>
-          <label class="card-field"><span>API 地址</span><input id="provider-url-input" class="card-input" placeholder="https://api.example.com/v1"></label>
-          <label class="card-field"><span>API 密钥</span><input id="provider-key-input" class="card-input" type="password" placeholder="sk-..."></label>
+          <div class="provider-editor-hint">
+            <strong>说明：</strong>API 地址只填域名或根路径；具体接口路径填在「Endpoint 路径」里。大多数 OpenAI 兼容平台保持默认即可，只有 Azure/特殊中转站才需要改。
+          </div>
+          <label class="card-field"><span>接口模板</span>
+            <select id="provider-template-select" class="card-input">
+              <option value="openai">OpenAI 兼容</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="azure">Azure OpenAI</option>
+              <option value="custom">自定义</option>
+            </select>
+            <span class="field-help">选择平台类型。OpenAI 兼容适用于 kkaiapi / OneAPI / NewAPI 等大多数中转平台。</span>
+          </label>
+          <label class="card-field"><span>接口名称</span><input id="provider-name-input" class="card-input" placeholder="如：小米 Token Plan">
+            <span class="field-help">仅用于本界面展示，不影响实际请求。</span>
+          </label>
+          <label class="card-field"><span>API 地址</span><input id="provider-url-input" class="card-input" placeholder="https://api.example.com">
+            <span class="field-help">基础地址，不要带路径。例如 https://api.kkaiapi.com 或 https://api.deepseek.com</span>
+          </label>
+          <label class="card-field"><span>Endpoint 路径</span><input id="provider-endpoint-input" class="card-input" placeholder="/v1/chat/completions">
+            <span class="field-help">聊天补全接口的相对路径。绝大多数平台用 /v1/chat/completions；Azure 用 /openai/deployments/{model}/chat/completions</span>
+          </label>
+          <label class="card-field"><span>鉴权方式</span>
+            <select id="provider-auth-select" class="card-input">
+              <option value="bearer">Authorization: Bearer</option>
+              <option value="api-key">api-key Header</option>
+              <option value="header">自定义 Header</option>
+              <option value="query">URL 参数</option>
+              <option value="none">无需鉴权</option>
+            </select>
+            <span class="field-help">OpenAI / kkaiapi / DeepSeek 都用 Bearer；Azure 用 api-key；少数平台需要自定义。</span>
+          </label>
+          <label class="card-field" id="provider-auth-header-row" style="display:none"><span>Header 名 / 参数名</span><input id="provider-auth-header-input" class="card-input" placeholder="api-key">
+            <span class="field-help">鉴权时使用的 Header 名或 URL 参数名。</span>
+          </label>
+          <label class="card-field" id="provider-auth-prefix-row" style="display:none"><span>Token 前缀</span><input id="provider-auth-prefix-input" class="card-input" placeholder="Bearer ">
+            <span class="field-help">放在密钥前面的字符串，如「Bearer 」或「Key 」。留空表示不加前缀。</span>
+          </label>
+          <label class="card-field"><span>API 密钥</span><input id="provider-key-input" class="card-input" type="password" placeholder="sk-...">
+            <span class="field-help">从平台控制台获取的 API Key。直连模式下会发送到浏览器，建议在可信环境使用。</span>
+          </label>
+          <label class="card-field"><span>额外请求头 (JSON)</span><textarea id="provider-extra-headers-input" class="card-input" rows="2" placeholder='{"x-trace-id": "..."}'></textarea>
+            <span class="field-help">需要随每个请求一起发送的额外 HTTP 头，JSON 对象格式。一般不需要填。</span>
+          </label>
+          <label class="card-field"><span>额外 URL 参数 (JSON)</span><textarea id="provider-extra-query-input" class="card-input" rows="2" placeholder='{"api-version": "2024-06-01"}'></textarea>
+            <span class="field-help">需要附加到 URL 的查询参数，JSON 对象格式。Azure 需填 api-version。</span>
+          </label>
           <div class="provider-editor-actions">
             <button id="btn-test-provider" class="btn btn-small">测试连接</button>
             <span id="provider-test-result" class="provider-test-result"></span>
           </div>
-          <label class="card-field"><span>模型列表（逗号分隔）</span><input id="provider-models-input" class="card-input" placeholder="model1, model2"></label>
+          <label class="card-field"><span>模型列表（逗号分隔）</span><input id="provider-models-input" class="card-input" placeholder="model1, model2">
+            <span class="field-help">点击「测试连接」可自动拉取。手动填写时用英文逗号分隔，如 gpt-4o, claude-sonnet-4-6</span>
+          </label>
           <div class="provider-editor-actions">
             <button id="btn-save-provider" class="btn btn-small btn-primary">保存</button>
             <button id="btn-close-provider-editor" class="btn btn-small" style="background:var(--bg3);color:var(--text)">取消</button>

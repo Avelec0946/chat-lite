@@ -64,27 +64,192 @@ function showToast(msg, type) {
   t._timer = setTimeout(function() { t.classList.remove('show'); }, 4000);
 }
 
+function parseJsonField(str, fallback) {
+  str = (str || '').trim();
+  if (!str || str === '{}') return fallback || {};
+  try {
+    var parsed = JSON.parse(str);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return fallback || {};
+    return parsed;
+  } catch(e) {
+    return fallback || {};
+  }
+}
+
+function toggleProviderAuthFields() {
+  var authType = document.getElementById('provider-auth-select').value;
+  var headerRow = document.getElementById('provider-auth-header-row');
+  var prefixRow = document.getElementById('provider-auth-prefix-row');
+  if (!headerRow || !prefixRow) return;
+  if (authType === 'bearer') {
+    headerRow.style.display = 'none';
+    prefixRow.style.display = 'none';
+  } else if (authType === 'api-key') {
+    headerRow.style.display = 'flex';
+    prefixRow.style.display = 'none';
+  } else if (authType === 'header') {
+    headerRow.style.display = 'flex';
+    prefixRow.style.display = 'flex';
+  } else if (authType === 'query') {
+    headerRow.style.display = 'flex';
+    prefixRow.style.display = 'none';
+  } else if (authType === 'none') {
+    headerRow.style.display = 'none';
+    prefixRow.style.display = 'none';
+  }
+}
+
 // ===== Provider System =====
 const PROVIDERS_KEY = 'chatlite_providers';
 state.providers = [];
 
 function getProvider(id) {
-  return (state.providers || []).find(p => p.id === id) || null;
+  var raw = (state.providers || []).find(function(p) { return p.id === id; }) || null;
+  return raw ? normalizeProvider(raw) : null;
 }
 
 function normalizeBaseUrl(url) {
-  url = (url || '').trim().replace(/\/+$/, '');
-  // 已经包含版本路径段（/v1, /v2, /v4 等）就不再强制加 /v1
-  // 否则会把 GLM 的 /v4 改成 /v4/v1 导致 404
-  if (!/\/v\d+$/i.test(url)) url += '/v1';
-  return url;
+  return (url || '').trim().replace(/\/+$/, '');
+}
+
+// ===== Provider Templates =====
+const PROVIDER_TEMPLATES = {
+  openai: {
+    endpointPath: '/v1/chat/completions',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    modelsEndpoint: '/v1/models',
+    features: { supportsStreaming: true, supportsThinking: false, supportsVision: true, maxTokensField: 'max_tokens' }
+  },
+  deepseek: {
+    endpointPath: '/v1/chat/completions',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    modelsEndpoint: '/v1/models',
+    features: { supportsStreaming: true, supportsThinking: true, supportsVision: false, maxTokensField: 'max_tokens' }
+  },
+  azure: {
+    endpointPath: '/openai/deployments/{model}/chat/completions',
+    authType: 'api-key',
+    authHeader: 'api-key',
+    authPrefix: '',
+    modelsEndpoint: '/v1/models',
+    features: { supportsStreaming: true, supportsThinking: false, supportsVision: true, maxTokensField: 'max_tokens' }
+  },
+  custom: {
+    endpointPath: '/v1/chat/completions',
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    modelsEndpoint: '/v1/models',
+    features: { supportsStreaming: true, supportsThinking: false, supportsVision: true, maxTokensField: 'max_tokens' }
+  }
+};
+
+function getProviderTemplate(template) {
+  return PROVIDER_TEMPLATES[template] || PROVIDER_TEMPLATES.openai;
+}
+
+function normalizeProvider(p) {
+  if (!p || typeof p !== 'object') p = {};
+  var template = getProviderTemplate(p.template);
+  var baseUrl = normalizeBaseUrl(p.baseUrl);
+  // If baseUrl still ends with a version path (legacy migration), strip it and put into endpointPath
+  var endpointPath = p.endpointPath;
+  if (!endpointPath) {
+    var m = baseUrl.match(/^(.*)(\/v\d+)$/i);
+    if (m) {
+      baseUrl = m[1];
+      endpointPath = m[2] + '/chat/completions';
+    } else {
+      endpointPath = template.endpointPath;
+    }
+  }
+  return {
+    id: p.id || uid(),
+    name: p.name || '未命名接口',
+    template: p.template || 'openai',
+    baseUrl: baseUrl,
+    endpointPath: endpointPath,
+    apiKey: p.apiKey || '',
+    authType: p.authType || template.authType,
+    authHeader: p.authHeader || template.authHeader,
+    authPrefix: p.authPrefix !== undefined ? p.authPrefix : template.authPrefix,
+    extraHeaders: p.extraHeaders || {},
+    extraQuery: p.extraQuery || {},
+    models: normalizeModels(p.models),
+    features: Object.assign({}, template.features, p.features || {}),
+    createdAt: p.createdAt || Date.now()
+  };
+}
+
+function normalizeModels(models) {
+  if (!models) return [];
+  if (typeof models === 'string') return models.split(/[,，]/).map(function(s) { return s.trim(); }).filter(Boolean).map(function(id) { return { id: id }; });
+  if (!Array.isArray(models)) return [];
+  return models.map(function(m) {
+    if (typeof m === 'string') return { id: m };
+    return { id: m.id || m.name, name: m.name || m.id, upstreamId: m.upstreamId || m.id || m.name };
+  }).filter(function(m) { return m.id; });
+}
+
+function modelToUpstreamId(provider, modelId) {
+  var model = (provider.models || []).find(function(m) { return m.id === modelId; });
+  return (model && model.upstreamId) || modelId;
+}
+
+function resolveTemplate(str, vars) {
+  return str.replace(/\{(\w+)\}/g, function(m, k) { return vars[k] !== undefined ? vars[k] : m; });
+}
+
+function buildUpstreamPayload(provider, body) {
+  var p = normalizeProvider(provider);
+  var url = new URL(resolveTemplate(p.endpointPath, {
+    model: body.model,
+    apiVersion: body.apiVersion || p.extraQuery['api-version'] || '2024-06-01'
+  }), p.baseUrl);
+
+  Object.entries(p.extraQuery || {}).forEach(function(kv) {
+    url.searchParams.set(kv[0], kv[1]);
+  });
+
+  var headers = Object.assign({ 'Content-Type': 'application/json' }, p.extraHeaders || {});
+  if (p.authType === 'bearer') {
+    headers[p.authHeader] = (p.authPrefix || 'Bearer ') + p.apiKey;
+  } else if (p.authType === 'api-key') {
+    headers[p.authHeader] = p.apiKey;
+  } else if (p.authType === 'header') {
+    headers[p.authHeader] = (p.authPrefix || '') + p.apiKey;
+  } else if (p.authType === 'query') {
+    url.searchParams.set(p.authHeader || 'api_key', p.apiKey);
+  }
+
+  var payload = Object.assign({}, body);
+  delete payload.thinkingEnabled;
+  delete payload.apiVersion;
+  delete payload.provider;
+  if (!p.features.supportsThinking) delete payload.thinking;
+  if (p.features.maxTokensField && p.features.maxTokensField !== 'max_tokens' && payload.max_tokens !== undefined) {
+    payload[p.features.maxTokensField] = payload.max_tokens;
+    delete payload.max_tokens;
+  }
+
+  return { url: url.toString(), headers: headers, payload: payload };
+}
+
+function getModelsEndpoint(provider) {
+  var p = normalizeProvider(provider);
+  var template = getProviderTemplate(p.template);
+  return resolveTemplate(p.modelsEndpoint || template.modelsEndpoint, { apiVersion: p.extraQuery['api-version'] || '2024-06-01' });
 }
 
 async function loadProviders() {
   try {
     var data = await idbGet(PROVIDERS_KEY);
     if (data && Array.isArray(data)) {
-      state.providers = data;
+      state.providers = data.map(function(p) { return normalizeProvider(p); });
       return;
     }
   } catch(e) { console.warn('loadProviders failed:', e); }
@@ -103,20 +268,19 @@ function migrateOldApiKey() {
   if (state.providers.length > 0) return; // already has providers
   var oldKey = settings.apiKey || '';
   if (!oldKey) return; // no old key to migrate
-  var provider = {
-    id: uid(),
+  var provider = normalizeProvider({
     name: 'DeepSeek',
-    baseUrl: normalizeBaseUrl('https://api.deepseek.com/v1'),
+    template: 'deepseek',
+    baseUrl: 'https://api.deepseek.com',
     apiKey: oldKey,
-    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
-    createdAt: Date.now()
-  };
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro']
+  });
   state.providers.push(provider);
   saveProviders();
   // Migrate conversations: match model name to provider
   for (var conv of state.conversations) {
     if (!conv.providerId) {
-      var matched = state.providers.find(p => p.models && p.models.includes(conv.model));
+      var matched = state.providers.find(function(p) { return p.models && p.models.some(function(m) { return m.id === conv.model; }); });
       if (matched) conv.providerId = matched.id;
     }
   }
@@ -135,11 +299,12 @@ function renderModelSelector() {
   }
   var html = '';
   for (var p of state.providers) {
-    if (!p.models || p.models.length === 0) continue;
+    var models = p.models || [];
+    if (models.length === 0) continue;
     html += '<optgroup label="' + escapeHtml(p.name) + '">';
-    for (var m of p.models) {
-      var val = p.id + ':' + m;
-      html += '<option value="' + escapeHtml(val) + '">' + escapeHtml(m) + '</option>';
+    for (var m of models) {
+      var val = p.id + ':' + m.id;
+      html += '<option value="' + escapeHtml(val) + '">' + escapeHtml(m.name || m.id) + '</option>';
     }
     html += '</optgroup>';
   }
@@ -156,20 +321,20 @@ function syncModelSelector() {
       sel.value = val;
     } else {
       // Fallback: find first available
-      var fallback = state.providers.find(p => p.models && p.models.length > 0);
+      var fallback = state.providers.find(function(p) { return p.models && p.models.length > 0; });
       if (fallback) {
         conv.providerId = fallback.id;
-        conv.model = fallback.models[0];
-        sel.value = fallback.id + ':' + fallback.models[0];
+        conv.model = fallback.models[0].id;
+        sel.value = fallback.id + ':' + fallback.models[0].id;
       }
     }
   } else if (state.providers.length > 0) {
     var p = state.providers[0];
     if (p.models && p.models.length > 0) {
       conv.providerId = p.id;
-      conv.model = p.models[0];
+      conv.model = p.models[0].id;
       var sel2 = $('model-select');
-      if (sel2) sel2.value = p.id + ':' + p.models[0];
+      if (sel2) sel2.value = p.id + ':' + p.models[0].id;
     }
   }
 }
@@ -230,10 +395,11 @@ function renderProviderList() {
     return;
   }
   container.innerHTML = state.providers.map(function(p, i) {
-    var models = (p.models || []).join(', ') || '(无模型)';
+    var templateLabel = p.template ? '[' + p.template.toUpperCase() + '] ' : '';
+    var models = (p.models || []).map(function(m) { return m.name || m.id; }).join(', ') || '(无模型)';
     return '<div class="provider-item" data-idx="' + i + '">' +
       '<div class="provider-header">' +
-        '<span class="provider-name">' + escapeHtml(p.name) + '</span>' +
+        '<span class="provider-name">' + escapeHtml(templateLabel + p.name) + '</span>' +
         '<div class="provider-actions">' +
           '<button class="btn btn-small provider-edit" data-idx="' + i + '">编辑</button>' +
           '<button class="btn btn-small provider-delete" data-idx="' + i + '" style="background:var(--bg3);color:var(--text)">删除</button>' +
@@ -241,6 +407,7 @@ function renderProviderList() {
       '</div>' +
       '<div class="provider-detail">' +
         '<span class="provider-url">' + escapeHtml(p.baseUrl) + '</span>' +
+        '<span class="provider-endpoint">' + escapeHtml(p.endpointPath || '') + '</span>' +
         '<span class="provider-models">模型: ' + escapeHtml(models) + '</span>' +
       '</div>' +
     '</div>';
@@ -256,15 +423,23 @@ function renderProviderList() {
 
 function openProviderEditor(idx) {
   var editor = document.getElementById('provider-editor');
-  var p = (idx !== undefined && idx >= 0) ? state.providers[idx] : null;
+  var p = (idx !== undefined && idx >= 0) ? normalizeProvider(state.providers[idx]) : null;
   editor.style.display = 'block';
   editor.dataset.editIdx = idx !== undefined ? idx : '';
+  document.getElementById('provider-template-select').value = p ? p.template : 'openai';
   document.getElementById('provider-name-input').value = p ? p.name : '';
   document.getElementById('provider-url-input').value = p ? p.baseUrl : '';
+  document.getElementById('provider-endpoint-input').value = p ? (p.endpointPath || '') : '';
+  document.getElementById('provider-auth-select').value = p ? p.authType : 'bearer';
+  document.getElementById('provider-auth-header-input').value = p ? (p.authHeader || '') : '';
+  document.getElementById('provider-auth-prefix-input').value = p ? (p.authPrefix !== undefined ? p.authPrefix : '') : 'Bearer ';
   document.getElementById('provider-key-input').value = p ? p.apiKey : '';
-  document.getElementById('provider-models-input').value = p ? (p.models || []).join(', ') : '';
+  document.getElementById('provider-extra-headers-input').value = p ? JSON.stringify(p.extraHeaders || {}, null, 2) : '{}';
+  document.getElementById('provider-extra-query-input').value = p ? JSON.stringify(p.extraQuery || {}, null, 2) : '{}';
+  document.getElementById('provider-models-input').value = p ? (p.models || []).map(function(m) { return m.id; }).join(', ') : '';
   document.getElementById('provider-test-result').textContent = '';
   document.getElementById('provider-test-result').className = 'provider-test-result';
+  toggleProviderAuthFields();
 }
 
 function closeProviderEditor() {
@@ -274,21 +449,39 @@ function closeProviderEditor() {
 async function testProviderConnection() {
   var baseUrl = normalizeBaseUrl(document.getElementById('provider-url-input').value);
   var apiKey = document.getElementById('provider-key-input').value.trim();
+  var template = document.getElementById('provider-template-select').value;
+  var endpointPath = document.getElementById('provider-endpoint-input').value.trim();
+  var authType = document.getElementById('provider-auth-select').value;
+  var authHeader = document.getElementById('provider-auth-header-input').value.trim();
+  var authPrefix = document.getElementById('provider-auth-prefix-input').value;
+  var extraHeaders = parseJsonField(document.getElementById('provider-extra-headers-input').value, {});
+  var extraQuery = parseJsonField(document.getElementById('provider-extra-query-input').value, {});
   var resultEl = document.getElementById('provider-test-result');
   if (!baseUrl || !apiKey) {
     resultEl.textContent = '请填写 API 地址和密钥';
     resultEl.className = 'provider-test-result error';
     return;
   }
+  var tempProvider = normalizeProvider({
+    template: template,
+    baseUrl: baseUrl,
+    endpointPath: endpointPath,
+    apiKey: apiKey,
+    authType: authType,
+    authHeader: authHeader,
+    authPrefix: authPrefix,
+    extraHeaders: extraHeaders,
+    extraQuery: extraQuery
+  });
   resultEl.textContent = '测试中...';
   resultEl.className = 'provider-test-result';
   try {
-    var resp = await fetch(baseUrl + '/models', {
-      headers: { 'Authorization': 'Bearer ' + apiKey }
-    });
+    var modelsPath = baseUrl + getModelsEndpoint(tempProvider);
+    var req = buildUpstreamPayload(tempProvider, { model: '', apiVersion: extraQuery['api-version'] || '2024-06-01' });
+    var resp = await fetch(modelsPath, { headers: req.headers });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     var data = await resp.json();
-    var models = (data.data || []).map(function(m) { return m.id; }).filter(Boolean);
+    var models = normalizeModels(data).map(function(m) { return m.id; });
     if (models.length > 0) {
       document.getElementById('provider-models-input').value = models.join(', ');
       resultEl.textContent = '✅ 连接成功，发现 ' + models.length + ' 个模型';
@@ -305,28 +498,42 @@ async function testProviderConnection() {
 
 function saveProviderFromEditor() {
   var editor = document.getElementById('provider-editor');
+  var template = document.getElementById('provider-template-select').value;
   var name = document.getElementById('provider-name-input').value.trim();
   var baseUrl = normalizeBaseUrl(document.getElementById('provider-url-input').value);
+  var endpointPath = document.getElementById('provider-endpoint-input').value.trim();
+  var authType = document.getElementById('provider-auth-select').value;
+  var authHeader = document.getElementById('provider-auth-header-input').value.trim();
+  var authPrefix = document.getElementById('provider-auth-prefix-input').value;
   var apiKey = document.getElementById('provider-key-input').value.trim();
+  var extraHeaders = parseJsonField(document.getElementById('provider-extra-headers-input').value, {});
+  var extraQuery = parseJsonField(document.getElementById('provider-extra-query-input').value, {});
   var modelsStr = document.getElementById('provider-models-input').value.trim();
   var models = modelsStr ? modelsStr.split(/[,，]/).map(function(s) { return s.trim(); }).filter(Boolean) : [];
   if (!name || !baseUrl || !apiKey) {
     showToast('请填写接口名称、地址和密钥', 'warn');
     return;
   }
+  var providerData = {
+    template: template,
+    name: name,
+    baseUrl: baseUrl,
+    endpointPath: endpointPath,
+    apiKey: apiKey,
+    authType: authType,
+    authHeader: authHeader,
+    authPrefix: authPrefix,
+    extraHeaders: extraHeaders,
+    extraQuery: extraQuery,
+    models: models
+  };
   var editIdx = editor.dataset.editIdx;
   if (editIdx !== '' && editIdx !== undefined && parseInt(editIdx) >= 0) {
-    // Edit existing
-    state.providers[parseInt(editIdx)].name = name;
-    state.providers[parseInt(editIdx)].baseUrl = baseUrl;
-    state.providers[parseInt(editIdx)].apiKey = apiKey;
-    state.providers[parseInt(editIdx)].models = models;
+    // Preserve original id
+    providerData.id = state.providers[parseInt(editIdx)].id;
+    state.providers[parseInt(editIdx)] = normalizeProvider(providerData);
   } else {
-    // Add new
-    state.providers.push({
-      id: uid(), name: name, baseUrl: baseUrl,
-      apiKey: apiKey, models: models, createdAt: Date.now()
-    });
+    state.providers.push(normalizeProvider(providerData));
   }
   saveProviders();
   renderProviderList();
@@ -514,7 +721,7 @@ function newConversation() {
   return {
     id: uid(),
     title: '新对话',
-    model: (state.providers && state.providers[0] && state.providers[0].models && state.providers[0].models[0]) || 'deepseek-v4-flash',
+    model: (state.providers && state.providers[0] && state.providers[0].models && state.providers[0].models[0] && state.providers[0].models[0].id) || 'deepseek-v4-flash',
     providerId: (state.providers && state.providers[0] && state.providers[0].id) || null,
     thinkingEnabled: settings.thinkingEnabled,
     systemPrompt: '',
@@ -910,6 +1117,15 @@ async function init() {
   $('btn-close-provider-editor').addEventListener('click', closeProviderEditor);
   $('btn-test-provider').addEventListener('click', testProviderConnection);
   $('btn-save-provider').addEventListener('click', saveProviderFromEditor);
+  $('provider-template-select').addEventListener('change', function() {
+    var t = getProviderTemplate(this.value);
+    document.getElementById('provider-endpoint-input').value = t.endpointPath;
+    document.getElementById('provider-auth-select').value = t.authType;
+    document.getElementById('provider-auth-header-input').value = t.authHeader;
+    document.getElementById('provider-auth-prefix-input').value = t.authPrefix;
+    toggleProviderAuthFields();
+  });
+  $('provider-auth-select').addEventListener('change', toggleProviderAuthFields);
   renderProviderList();
 
   // Enable send button on init
@@ -1740,40 +1956,29 @@ async function sendFromMessage(context) {
   }
   var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
   var useDirect = settings.directMode || !isLocal;
-  var apiUrl = useDirect
-    ? provider.baseUrl + '/chat/completions'
-    : '/api/chat/completions';
-  var apiKey = provider.apiKey;
-  if (useDirect && !apiKey) {
-    assistantMsg.content = '**错误：** 直连模式需要设置 API 密钥';
-    save(); renderMessages(); state.loading = false;
-    toggleSendStop(); scrollToBottom(); return;
-  }
-  var reqHeaders = { 'Content-Type': 'application/json' };
-  if (useDirect) reqHeaders['Authorization'] = 'Bearer ' + apiKey;
+
   var reqBody = {
     messages: context,
     model: conv.model,
     stream: true,
     thinkingEnabled: conv.thinkingEnabled !== false
   };
-  if (!useDirect) {
-    reqBody.baseUrl = provider.baseUrl;
-    reqBody.apiKey = apiKey;
-  }
-  // Direct mode: apply thinking toggle
-  var shouldDisableThinking = conv.thinkingEnabled === false;
+
+  var req;
   if (useDirect) {
-    if (shouldDisableThinking) {
-      reqBody.thinking = { type: 'disabled' };
-    }
-    delete reqBody.thinkingEnabled;
+    req = buildUpstreamPayload(provider, reqBody);
+  } else {
+    req = {
+      url: '/api/chat/completions',
+      headers: { 'Content-Type': 'application/json' },
+      payload: Object.assign({}, reqBody, { provider: provider })
+    };
   }
-  
-  const resp = await fetch(apiUrl, {
+
+  const resp = await fetch(req.url, {
     method: 'POST',
-    headers: reqHeaders,
-    body: JSON.stringify(reqBody),
+    headers: req.headers,
+    body: JSON.stringify(req.payload),
     signal: state.abortController?.signal
   });
 
@@ -1944,37 +2149,29 @@ async function sendFromMessageContinue(context, assistantMsg) {
     }
     var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
     var useDirect = settings.directMode || !isLocal;
-    var apiUrl = useDirect
-      ? provider.baseUrl + '/chat/completions'
-      : '/api/chat/completions';
-    var apiKey = provider.apiKey;
-    if (useDirect && !apiKey) {
-      assistantMsg.content = existingContent + '\n\n**错误：** 直连模式需要设置 API 密钥';
-      save(); renderMessages(); state.loading = false;
-      toggleSendStop(); scrollToBottom(); return;
-    }
-    var reqHeaders = { 'Content-Type': 'application/json' };
-    if (useDirect) reqHeaders['Authorization'] = 'Bearer ' + apiKey;
+
     var reqBody = {
       messages: context,
       model: conv.model,
       stream: true,
       thinkingEnabled: conv.thinkingEnabled !== false
     };
-    if (!useDirect) {
-      reqBody.baseUrl = provider.baseUrl;
-      reqBody.apiKey = apiKey;
-    }
-    var shouldDisableThinking = conv.thinkingEnabled === false;
+
+    var req;
     if (useDirect) {
-      if (shouldDisableThinking) reqBody.thinking = { type: 'disabled' };
-      delete reqBody.thinkingEnabled;
+      req = buildUpstreamPayload(provider, reqBody);
+    } else {
+      req = {
+        url: '/api/chat/completions',
+        headers: { 'Content-Type': 'application/json' },
+        payload: Object.assign({}, reqBody, { provider: provider })
+      };
     }
 
-    const resp = await fetch(apiUrl, {
+    const resp = await fetch(req.url, {
       method: 'POST',
-      headers: reqHeaders,
-      body: JSON.stringify(reqBody),
+      headers: req.headers,
+      body: JSON.stringify(req.payload),
       signal: state.abortController?.signal
     });
 
@@ -2839,7 +3036,7 @@ function importConversation(e) {
       renderMessages();
       // Match provider for imported conversation
       if (!conv.providerId && conv.model) {
-        var matched = state.providers.find(function(p) { return p.models && p.models.includes(conv.model); });
+        var matched = state.providers.find(function(p) { return p.models && p.models.some(function(m) { return m.id === conv.model; }); });
         if (matched) conv.providerId = matched.id;
         else if (state.providers.length > 0) { conv.providerId = state.providers[0].id; }
       }
