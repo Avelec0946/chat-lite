@@ -2,6 +2,16 @@
 
 通用 OpenAI 兼容 API 聊天界面。支持任意 OpenAI 格式接口，自定义 API 地址，自动发现模型，多 Provider 管理。
 
+> Android APK 版本：https://github.com/Avelec0946/chat-lite-android
+
+## 与 APK 仓库的关系
+
+**本仓库（网页版）与 APK 仓库（chat-lite-android）是独立的两个仓库。** 双方各自演进，**不默认同步、不自动跟进**对方改动。
+
+- 需要互通时，在 APK 仓库根目录运行 `sync.ps1`（可选双向、可预览差异）——按需同步，不是强制机制
+- 双向差异声明见 APK 仓库的 `www/SYNC-MANIFEST.md`
+- 本仓库独有：`server.js`（后端代理）、`sw.js`（PWA 离线）、`config.json`
+
 ## 启动
 
 ```bash

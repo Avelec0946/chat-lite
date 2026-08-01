@@ -1,15 +1,52 @@
+﻿// ===== Capacitor Environment Detection =====
+// 在 Capacitor APK 环境下返回 true，浏览器/PWA 环境下返回 false
+// 所有 APK 特有逻辑都用 isCapacitor() 分支隔离，主仓库同步时一眼能识别
+function isCapacitor() {
+  return typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform && Capacitor.isNativePlatform();
+}
+
+// 动态导入 Capacitor 插件（仅 APK 模式可用，浏览器模式调用会抛错）
+let CapFilesystem = null;
+let CapShare = null;
+let CapHttp = null;
+let CapStreamHttp = null;
+let CapHaptics = null;
+let CapRichHaptics = null;
+if (isCapacitor()) {
+  try {
+    CapFilesystem = Capacitor.Plugins && Capacitor.Plugins.Filesystem;
+    CapShare = Capacitor.Plugins && Capacitor.Plugins.Share;
+    CapHttp = Capacitor.Plugins && Capacitor.Plugins.CapacitorHttp;
+    CapStreamHttp = Capacitor.Plugins && Capacitor.Plugins.StreamHttp;
+    CapHaptics = Capacitor.Plugins && Capacitor.Plugins.Haptics;
+    CapRichHaptics = Capacitor.Plugins && (Capacitor.Plugins.RichHaptics || Capacitor.Plugins['capacitor-rich-haptics']);
+  } catch (e) {
+    console.warn('Capacitor plugins init failed:', e);
+  }
+}
+
 // ===== State =====
 const state = {
   conversations: [],
+  providers: [],  // v76 修复：从 providers.js 迁回此字段初始化（避免 TDZ 报错）
   currentId: null,
   loading: false,
   abortController: null,
   settingsOpen: false,
+  _isBackground: false,  // v67: 追踪前后台状态用于完成通知
+  _pendingTextNotify: null,  // v67: 文字回复后台完成时的待显示通知
   selectedMsgId: null,
+  // Capacitor 特有：标记当前请求是否被用户取消（原生 HTTP 无法真正中断）
+  _nativeAborted: false,
+  // 标记数据是否已从 IndexedDB 加载完成
+  _dataLoaded: false,
+  // 标记用户是否正在触摸滚动（流式输出时暂停 DOM 更新，避免阻塞滚动）
+  _isTouching: false,
+  // 当前正在流式输出的 assistantMsg（松手后立即渲染）
+  _streamingMsg: null,
 };
 
-const STORAGE_KEY = 'chatlite_data';
-const SETTINGS_KEY = 'chatlite_settings';
+// STORAGE_KEY / SETTINGS_KEY 已迁移到 db.js
 
 // ===== Flat SVG Icons (stroke-based, consistent with toolbar) =====
 const ICON = {
@@ -24,45 +61,12 @@ const ICON = {
   x: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
 };
 
-// ===== IndexedDB (replaces localStorage for large data) =====
-const IDB_NAME = 'chatlite_db';
-const IDB_VER = 1;
-const IDB_STORE = 'data';
-
-function openDB() {
-  return new Promise(function(resolve, reject) {
-    var req = indexedDB.open(IDB_NAME, IDB_VER);
-    req.onupgradeneeded = function(e) {
-      var db = e.target.result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
-    };
-    req.onsuccess = function() { resolve(req.result); };
-    req.onerror = function() { reject(req.error); };
-  });
-}
-
-function idbPut(key, val) {
-  return openDB().then(function(db) {
-    return new Promise(function(resolve, reject) {
-      var tx = db.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).put(val, key);
-      tx.oncomplete = function() { resolve(); };
-      tx.onerror = function() { reject(tx.error); };
-    });
-  });
-}
-
-function idbGet(key) {
-  return openDB().then(function(db) {
-    return new Promise(function(resolve, reject) {
-      var tx = db.transaction(IDB_STORE, 'readonly');
-      var req = tx.objectStore(IDB_STORE).get(key);
-      req.onsuccess = function() { resolve(req.result); };
-      req.onerror = function() { reject(req.error); };
-    });
-  });
-}
-let settings = loadSettings();
+// IndexedDB 存储层（openDB / idbPut / idbGet / 常量）已迁移到 db.js
+// SETTINGS_IDB_KEY 已迁移到 db.js
+// 同步初始化默认值，init 中 await initSettings() 会从 IDB 覆盖
+// defaultSettings 由 db.js 提供（db.js 先于 app.js 加载）
+let settings = defaultSettings();
+let _settingsLoaded = false;  // 标记 settings 是否已从 IDB 加载完成
 let isLongPress = false;
 
 // ===== Helpers =====
@@ -72,295 +76,30 @@ function showToast(msg, type) {
   var t = document.getElementById('app-toast');
   if (!t) { t = document.createElement('div'); t.id = 'app-toast'; t.className = 'toast'; document.body.appendChild(t); }
   t.textContent = msg;
-  t.className = 'toast' + (type === 'warn' ? ' warn' : '');
+  var cls = 'toast';
+  if (type === 'warn') cls += ' warn';
+  else if (type === 'success') cls += ' success';
+  else if (type === 'info') cls += ' info';
+  else if (type === 'danger') cls += ' danger';
+  t.className = cls;
   t.classList.add('show');
   clearTimeout(t._timer);
   t._timer = setTimeout(function() { t.classList.remove('show'); }, 4000);
 }
 
-function parseJsonField(str, fallback) {
-  str = (str || '').trim();
-  if (!str || str === '{}') return fallback || {};
-  try {
-    var parsed = JSON.parse(str);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return fallback || {};
-    return parsed;
-  } catch(e) {
-    return fallback || {};
-  }
-}
+// parseJsonField + toggleProviderAuthFields 已迁移到 providers.js
 
-function toggleProviderAuthFields() {
-  var authType = document.getElementById('provider-auth-select').value;
-  var headerRow = document.getElementById('provider-auth-header-row');
-  var prefixRow = document.getElementById('provider-auth-prefix-row');
-  if (!headerRow || !prefixRow) return;
-  if (authType === 'bearer') {
-    headerRow.style.display = 'none';
-    prefixRow.style.display = 'none';
-  } else if (authType === 'api-key') {
-    headerRow.style.display = 'flex';
-    prefixRow.style.display = 'none';
-  } else if (authType === 'header') {
-    headerRow.style.display = 'flex';
-    prefixRow.style.display = 'flex';
-  } else if (authType === 'query') {
-    headerRow.style.display = 'flex';
-    prefixRow.style.display = 'none';
-  } else if (authType === 'none') {
-    headerRow.style.display = 'none';
-    prefixRow.style.display = 'none';
-  }
-}
+// Provider System（getProvider/PROVIDER_TEMPLATES/normalizeProvider 等） 已迁移到 providers.js
 
-// ===== Provider System =====
-const PROVIDERS_KEY = 'chatlite_providers';
-state.providers = [];
+// 生图 Provider 模板与归一化（IMAGE_PROVIDER_TEMPLATES/normalizeImageProvider/getImageProvider 等） 已迁移到 image-gen.js
 
-function getProvider(id) {
-  var raw = (state.providers || []).find(function(p) { return p.id === id; }) || null;
-  return raw ? normalizeProvider(raw) : null;
-}
+// normalizeProvider + normalizeModels 已迁移到 providers.js
 
-function normalizeBaseUrl(url) {
-  return (url || '').trim().replace(/\/+$/, '');
-}
+// buildUpstreamPayload + loadProviders + saveProviders 已迁移到 providers.js
 
-// ===== Provider Templates =====
-const PROVIDER_TEMPLATES = {
-  openai: {
-    endpointPath: '/v1/chat/completions',
-    authType: 'bearer',
-    authHeader: 'Authorization',
-    authPrefix: 'Bearer ',
-    modelsEndpoint: '/v1/models',
-    features: { supportsStreaming: true, supportsThinking: false, supportsVision: true, maxTokensField: 'max_tokens' }
-  },
-  deepseek: {
-    endpointPath: '/v1/chat/completions',
-    authType: 'bearer',
-    authHeader: 'Authorization',
-    authPrefix: 'Bearer ',
-    modelsEndpoint: '/v1/models',
-    features: { supportsStreaming: true, supportsThinking: true, supportsVision: false, maxTokensField: 'max_tokens' }
-  },
-  azure: {
-    endpointPath: '/openai/deployments/{model}/chat/completions',
-    authType: 'api-key',
-    authHeader: 'api-key',
-    authPrefix: '',
-    modelsEndpoint: '/v1/models',
-    features: { supportsStreaming: true, supportsThinking: false, supportsVision: true, maxTokensField: 'max_tokens' }
-  },
-  custom: {
-    endpointPath: '/v1/chat/completions',
-    authType: 'bearer',
-    authHeader: 'Authorization',
-    authPrefix: 'Bearer ',
-    modelsEndpoint: '/v1/models',
-    features: { supportsStreaming: true, supportsThinking: false, supportsVision: true, maxTokensField: 'max_tokens' }
-  }
-};
+// migrateOldApiKey 已迁移到 providers.js
 
-function getProviderTemplate(template) {
-  return PROVIDER_TEMPLATES[template] || PROVIDER_TEMPLATES.openai;
-}
-
-function normalizeProvider(p) {
-  if (!p || typeof p !== 'object') p = {};
-  var template = getProviderTemplate(p.template);
-  var baseUrl = normalizeBaseUrl(p.baseUrl);
-  // If baseUrl still ends with a version path (legacy migration), strip it and put into endpointPath
-  var endpointPath = p.endpointPath;
-  if (!endpointPath) {
-    var m = baseUrl.match(/^(.*)(\/v\d+)$/i);
-    if (m) {
-      baseUrl = m[1];
-      endpointPath = m[2] + '/chat/completions';
-    } else {
-      endpointPath = template.endpointPath;
-    }
-  }
-  return {
-    id: p.id || uid(),
-    name: p.name || '未命名接口',
-    template: p.template || 'openai',
-    baseUrl: baseUrl,
-    endpointPath: endpointPath,
-    apiKey: p.apiKey || '',
-    authType: p.authType || template.authType,
-    authHeader: p.authHeader || template.authHeader,
-    authPrefix: p.authPrefix !== undefined ? p.authPrefix : template.authPrefix,
-    extraHeaders: p.extraHeaders || {},
-    extraQuery: p.extraQuery || {},
-    models: normalizeModels(p.models),
-    features: Object.assign({}, template.features, p.features || {}),
-    createdAt: p.createdAt || Date.now()
-  };
-}
-
-function normalizeModels(models) {
-  if (!models) return [];
-  if (typeof models === 'string') return models.split(/[,，]/).map(function(s) { return s.trim(); }).filter(Boolean).map(function(id) { return { id: id }; });
-  if (!Array.isArray(models)) return [];
-  return models.map(function(m) {
-    if (typeof m === 'string') return { id: m };
-    return { id: m.id || m.name, name: m.name || m.id, upstreamId: m.upstreamId || m.id || m.name };
-  }).filter(function(m) { return m.id; });
-}
-
-function modelToUpstreamId(provider, modelId) {
-  var model = (provider.models || []).find(function(m) { return m.id === modelId; });
-  return (model && model.upstreamId) || modelId;
-}
-
-function resolveTemplate(str, vars) {
-  return str.replace(/\{(\w+)\}/g, function(m, k) { return vars[k] !== undefined ? vars[k] : m; });
-}
-
-function buildUpstreamPayload(provider, body) {
-  var p = normalizeProvider(provider);
-  var url = new URL(resolveTemplate(p.endpointPath, {
-    model: body.model,
-    apiVersion: body.apiVersion || p.extraQuery['api-version'] || '2024-06-01'
-  }), p.baseUrl);
-
-  Object.entries(p.extraQuery || {}).forEach(function(kv) {
-    url.searchParams.set(kv[0], kv[1]);
-  });
-
-  var headers = Object.assign({ 'Content-Type': 'application/json' }, p.extraHeaders || {});
-  if (p.authType === 'bearer') {
-    headers[p.authHeader] = (p.authPrefix || 'Bearer ') + p.apiKey;
-  } else if (p.authType === 'api-key') {
-    headers[p.authHeader] = p.apiKey;
-  } else if (p.authType === 'header') {
-    headers[p.authHeader] = (p.authPrefix || '') + p.apiKey;
-  } else if (p.authType === 'query') {
-    url.searchParams.set(p.authHeader || 'api_key', p.apiKey);
-  }
-
-  var payload = Object.assign({}, body);
-  // Convert thinkingEnabled flag to thinking field
-  // Respect user's explicit choice: if they turned off thinking, send disabled flag
-  // even for platforms that don't natively support it (aggregators may forward it)
-  if (payload.thinkingEnabled === false) {
-    payload.thinking = { type: 'disabled' };
-  } else {
-    delete payload.thinking;
-  }
-  delete payload.thinkingEnabled;
-  delete payload.apiVersion;
-  delete payload.provider;
-  // Only strip thinking for platforms that DEFINITELY don't support it AND user didn't explicitly disable
-  // (keeps disabled flag for aggregators that might forward to DeepSeek-like models)
-  if (p.features.maxTokensField && p.features.maxTokensField !== 'max_tokens' && payload.max_tokens !== undefined) {
-    payload[p.features.maxTokensField] = payload.max_tokens;
-    delete payload.max_tokens;
-  }
-
-  return { url: url.toString(), headers: headers, payload: payload };
-}
-
-function getModelsEndpoint(provider) {
-  var p = normalizeProvider(provider);
-  var template = getProviderTemplate(p.template);
-  return resolveTemplate(p.modelsEndpoint || template.modelsEndpoint, { apiVersion: p.extraQuery['api-version'] || '2024-06-01' });
-}
-
-async function loadProviders() {
-  try {
-    var data = await idbGet(PROVIDERS_KEY);
-    if (data && Array.isArray(data)) {
-      state.providers = data.map(function(p) { return normalizeProvider(p); });
-      return;
-    }
-  } catch(e) { console.warn('loadProviders failed:', e); }
-  state.providers = [];
-}
-
-function saveProviders() {
-  idbPut(PROVIDERS_KEY, state.providers).catch(function(e) {
-    console.warn('saveProviders failed:', e);
-    showToast('接口配置保存失败', 'warn');
-  });
-}
-
-function migrateOldApiKey() {
-  // One-time migration from old settings.apiKey to Provider system
-  if (state.providers.length > 0) return; // already has providers
-  var oldKey = settings.apiKey || '';
-  if (!oldKey) return; // no old key to migrate
-  var provider = normalizeProvider({
-    name: 'DeepSeek',
-    template: 'deepseek',
-    baseUrl: 'https://api.deepseek.com',
-    apiKey: oldKey,
-    models: ['deepseek-v4-flash', 'deepseek-v4-pro']
-  });
-  state.providers.push(provider);
-  saveProviders();
-  // Migrate conversations: match model name to provider
-  for (var conv of state.conversations) {
-    if (!conv.providerId) {
-      var matched = state.providers.find(function(p) { return p.models && p.models.some(function(m) { return m.id === conv.model; }); });
-      if (matched) conv.providerId = matched.id;
-    }
-  }
-  // Clear old key
-  delete settings.apiKey;
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  console.log('Migrated old API key to Provider system');
-}
-
-function renderModelSelector() {
-  var sel = $('model-select');
-  if (!sel) return;
-  if (!state.providers || state.providers.length === 0) {
-    sel.innerHTML = '<option disabled selected>请先在设置中添加接口</option>';
-    return;
-  }
-  var html = '';
-  for (var p of state.providers) {
-    var models = p.models || [];
-    if (models.length === 0) continue;
-    html += '<optgroup label="' + escapeHtml(p.name) + '">';
-    for (var m of models) {
-      var val = p.id + ':' + m.id;
-      html += '<option value="' + escapeHtml(val) + '">' + escapeHtml(m.name || m.id) + '</option>';
-    }
-    html += '</optgroup>';
-  }
-  sel.innerHTML = html;
-}
-
-function syncModelSelector() {
-  var conv = currentConv();
-  if (!conv) return;
-  if (conv.providerId && conv.model) {
-    var val = conv.providerId + ':' + conv.model;
-    var sel = $('model-select');
-    if (sel && sel.querySelector('option[value="' + CSS.escape(val) + '"]')) {
-      sel.value = val;
-    } else {
-      // Fallback: find first available
-      var fallback = state.providers.find(function(p) { return p.models && p.models.length > 0; });
-      if (fallback) {
-        conv.providerId = fallback.id;
-        conv.model = fallback.models[0].id;
-        sel.value = fallback.id + ':' + fallback.models[0].id;
-      }
-    }
-  } else if (state.providers.length > 0) {
-    var p = state.providers[0];
-    if (p.models && p.models.length > 0) {
-      conv.providerId = p.id;
-      conv.model = p.models[0].id;
-      var sel2 = $('model-select');
-      if (sel2) sel2.value = p.id + ':' + p.models[0].id;
-    }
-  }
-}
+// renderModelSelector + syncModelSelector 已迁移到 providers.js
 
 // ===== Vision: Image Upload =====
 function compressImageForUpload(file) {
@@ -409,222 +148,66 @@ function buildFileContent(m) {
   }
 }
 
-// ===== Provider Management UI =====
-function renderProviderList() {
-  var container = document.getElementById('provider-list');
-  if (!container) return;
-  if (!state.providers || state.providers.length === 0) {
-    container.innerHTML = '<div class="provider-empty">暂无接口，点击上方按钮添加</div>';
-    return;
-  }
-  container.innerHTML = state.providers.map(function(p, i) {
-    var templateLabel = p.template ? '[' + p.template.toUpperCase() + '] ' : '';
-    var models = (p.models || []).map(function(m) { return m.name || m.id; }).join(', ') || '(无模型)';
-    return '<div class="provider-item" data-idx="' + i + '">' +
-      '<div class="provider-header">' +
-        '<span class="provider-name">' + escapeHtml(templateLabel + p.name) + '</span>' +
-        '<div class="provider-actions">' +
-          '<button class="btn btn-small provider-edit" data-idx="' + i + '">编辑</button>' +
-          '<button class="btn btn-small provider-delete" data-idx="' + i + '" style="background:var(--bg3);color:var(--text)">删除</button>' +
-        '</div>' +
-      '</div>' +
-      '<div class="provider-detail">' +
-        '<span class="provider-url">' + escapeHtml(p.baseUrl) + '</span>' +
-        '<span class="provider-endpoint">' + escapeHtml(p.endpointPath || '') + '</span>' +
-        '<span class="provider-models">模型: ' + escapeHtml(models) + '</span>' +
-      '</div>' +
-    '</div>';
-  }).join('');
+// Provider Management UI（renderProviderList/openProviderEditor/deleteProvider 等） 已迁移到 providers.js
 
-  container.querySelectorAll('.provider-edit').forEach(function(btn) {
-    btn.addEventListener('click', function() { openProviderEditor(parseInt(btn.dataset.idx)); });
-  });
-  container.querySelectorAll('.provider-delete').forEach(function(btn) {
-    btn.addEventListener('click', function() { deleteProvider(parseInt(btn.dataset.idx)); });
-  });
-}
 
-function openProviderEditor(idx) {
-  var editor = document.getElementById('provider-editor');
-  var p = (idx !== undefined && idx >= 0) ? normalizeProvider(state.providers[idx]) : null;
-  editor.style.display = 'block';
-  editor.dataset.editIdx = idx !== undefined ? idx : '';
-  document.getElementById('provider-template-select').value = p ? p.template : 'openai';
-  document.getElementById('provider-name-input').value = p ? p.name : '';
-  document.getElementById('provider-url-input').value = p ? p.baseUrl : '';
-  document.getElementById('provider-endpoint-input').value = p ? (p.endpointPath || '') : '';
-  document.getElementById('provider-auth-select').value = p ? p.authType : 'bearer';
-  document.getElementById('provider-auth-header-input').value = p ? (p.authHeader || '') : '';
-  document.getElementById('provider-auth-prefix-input').value = p ? (p.authPrefix !== undefined ? p.authPrefix : '') : 'Bearer ';
-  document.getElementById('provider-key-input').value = p ? p.apiKey : '';
-  document.getElementById('provider-extra-headers-input').value = p ? JSON.stringify(p.extraHeaders || {}, null, 2) : '{}';
-  document.getElementById('provider-extra-query-input').value = p ? JSON.stringify(p.extraQuery || {}, null, 2) : '{}';
-  document.getElementById('provider-models-input').value = p ? (p.models || []).map(function(m) { return m.id; }).join(', ') : '';
-  document.getElementById('provider-test-result').textContent = '';
-  document.getElementById('provider-test-result').className = 'provider-test-result';
-  toggleProviderAuthFields();
-}
+// 生图 Provider 管理 UI（renderImageProviderList/openImageProviderEditor/deleteImageProvider 等） 已迁移到 image-gen.js
 
-function closeProviderEditor() {
-  document.getElementById('provider-editor').style.display = 'none';
-}
+// 生图界面与图库（updateImageGalleryCount/toggleImageView/renderImageStream） 已迁移到 image-gen.js
 
-async function testProviderConnection() {
-  var baseUrl = normalizeBaseUrl(document.getElementById('provider-url-input').value);
-  var apiKey = document.getElementById('provider-key-input').value.trim();
-  var template = document.getElementById('provider-template-select').value;
-  var endpointPath = document.getElementById('provider-endpoint-input').value.trim();
-  var authType = document.getElementById('provider-auth-select').value;
-  var authHeader = document.getElementById('provider-auth-header-input').value.trim();
-  var authPrefix = document.getElementById('provider-auth-prefix-input').value;
-  var extraHeaders = parseJsonField(document.getElementById('provider-extra-headers-input').value, {});
-  var extraQuery = parseJsonField(document.getElementById('provider-extra-query-input').value, {});
-  var resultEl = document.getElementById('provider-test-result');
-  if (!baseUrl || !apiKey) {
-    resultEl.textContent = '请填写 API 地址和密钥';
-    resultEl.className = 'provider-test-result error';
-    return;
-  }
-  var tempProvider = normalizeProvider({
-    template: template,
-    baseUrl: baseUrl,
-    endpointPath: endpointPath,
-    apiKey: apiKey,
-    authType: authType,
-    authHeader: authHeader,
-    authPrefix: authPrefix,
-    extraHeaders: extraHeaders,
-    extraQuery: extraQuery
-  });
-  resultEl.textContent = '测试中...';
-  resultEl.className = 'provider-test-result';
+// 图片预览与分享（showImagePreview/closeImagePreview/shareImage/deleteImageFromGallery） 已迁移到 image-gen.js
+
+// F1: 保存图片到设备相册（APK 用 Filesystem 写入 Download 目录，浏览器用 a 下载）
+async function saveImageToDevice(id) {
+  var img = (settings.images || []).find(function(x) { return x.id === id; });
+  if (!img) return;
   try {
-    var req = buildUpstreamPayload(tempProvider, { model: '', apiVersion: extraQuery['api-version'] || '2024-06-01' });
-    // Derive models endpoint from chat URL instead of hardcoding /v1/models
-    var modelsPath = req.url.replace(/\/chat\/completions/, '/models');
-    var resp = await fetch(modelsPath, { headers: req.headers });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    var data = await resp.json();
-    var models = normalizeModels(data).map(function(m) { return m.id; });
-    if (models.length > 0) {
-      document.getElementById('provider-models-input').value = models.join(', ');
-      resultEl.innerHTML = ICON.check + ' 连接成功，发现 ' + models.length + ' 个模型';
-      resultEl.className = 'provider-test-result success';
+    // 先获取 dataUrl（APK 模式从 Filesystem 读）
+    var dataUrl = await getImageDataUrl(img);
+    if (!dataUrl) { showToast('图片数据不可用', 'warn'); return; }
+    if (isCapacitor() && CapFilesystem) {
+      // 写入 Download 目录
+      var base64Data = dataUrl.split(',')[1];
+      var mime = (dataUrl.match(/data:(.*?);base64/) || [])[1] || 'image/png';
+      var ext = mime === 'image/jpeg' ? 'jpg' : (mime === 'image/webp' ? 'webp' : 'png');
+      var fileName = 'chatlite_' + Date.now() + '.' + ext;
+      var path = 'Download/' + fileName;
+      await CapFilesystem.writeFile({
+        path: path,
+        data: base64Data,
+        directory: 'EXTERNAL_STORAGE',
+        recursive: true
+      });
+      showToast('已保存到 Download/' + fileName, 'success');
     } else {
-      resultEl.innerHTML = ICON.warn + ' 连接成功但未发现模型，请手动填写';
-      resultEl.className = 'provider-test-result warn';
+      // 浏览器：触发下载
+      var a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = 'chatlite_' + Date.now() + '.png';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      showToast('已触发下载', 'success');
     }
   } catch(e) {
-    resultEl.innerHTML = ICON.x + ' 连接失败: ' + e.message;
-    resultEl.className = 'provider-test-result error';
+    console.error('saveImageToDevice failed:', e);
+    showToast('保存失败: ' + (e.message || e), 'warn');
   }
 }
 
-function saveProviderFromEditor() {
-  var editor = document.getElementById('provider-editor');
-  var template = document.getElementById('provider-template-select').value;
-  var name = document.getElementById('provider-name-input').value.trim();
-  var baseUrl = normalizeBaseUrl(document.getElementById('provider-url-input').value);
-  var endpointPath = document.getElementById('provider-endpoint-input').value.trim();
-  var authType = document.getElementById('provider-auth-select').value;
-  var authHeader = document.getElementById('provider-auth-header-input').value.trim();
-  var authPrefix = document.getElementById('provider-auth-prefix-input').value;
-  var apiKey = document.getElementById('provider-key-input').value.trim();
-  var extraHeaders = parseJsonField(document.getElementById('provider-extra-headers-input').value, {});
-  var extraQuery = parseJsonField(document.getElementById('provider-extra-query-input').value, {});
-  var modelsStr = document.getElementById('provider-models-input').value.trim();
-  var models = modelsStr ? modelsStr.split(/[,，]/).map(function(s) { return s.trim(); }).filter(Boolean) : [];
-  if (!name || !baseUrl || !apiKey) {
-    showToast('请填写接口名称、地址和密钥', 'warn');
-    return;
-  }
-  var providerData = {
-    template: template,
-    name: name,
-    baseUrl: baseUrl,
-    endpointPath: endpointPath,
-    apiKey: apiKey,
-    authType: authType,
-    authHeader: authHeader,
-    authPrefix: authPrefix,
-    extraHeaders: extraHeaders,
-    extraQuery: extraQuery,
-    models: models
-  };
-  var editIdx = editor.dataset.editIdx;
-  if (editIdx !== '' && editIdx !== undefined && parseInt(editIdx) >= 0) {
-    // Preserve original id
-    providerData.id = state.providers[parseInt(editIdx)].id;
-    state.providers[parseInt(editIdx)] = normalizeProvider(providerData);
-  } else {
-    state.providers.push(normalizeProvider(providerData));
-  }
-  saveProviders();
-  renderProviderList();
-  renderModelSelector();
-  syncModelSelector();
-  closeProviderEditor();
-}
-
-function deleteProvider(idx) {
-  if (!confirm('确定删除接口「' + state.providers[idx].name + '」？')) return;
-  state.providers.splice(idx, 1);
-  saveProviders();
-  // Fix conversations referencing deleted provider
-  for (var conv of state.conversations) {
-    if (conv.providerId && !getProvider(conv.providerId)) {
-      conv.providerId = null;
-    }
-  }
-  save();
-  renderProviderList();
-  renderModelSelector();
-  syncModelSelector();
-}
+// 图片压缩与存储（compressImageForGeneration/writeImageFile/readImageFile/getImageDataUrl） 已迁移到 image-gen.js
 
 
-var _saveQueue = Promise.resolve();
-function save() {
-  const conv = state.conversations.find(c => c.id === state.currentId);
-  if (conv) conv.updatedAt = Date.now();
-  // IndexedDB (async, fire-and-forget)
-  var payload = { conversations: state.conversations, currentId: state.currentId, version: 2 };
-  idbPut(STORAGE_KEY, payload).catch(function(e) {
-    console.warn('IndexedDB save failed:', e);
-    showToast('本地存储保存失败', 'warn');
-  });
-  // Sync to server (queued, with retry)
-  _saveQueue = _saveQueue.then(function() {
-    return fetch('/api/save', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        conversations: state.conversations,
-        currentId: state.currentId,
-        deletedIds: state.deletedIds || []
-      })
-    }).then(function(resp) {
-      if (!resp.ok) throw new Error('Server save failed: ' + resp.status);
-      return resp.json();
-    }).catch(function(err) {
-      console.error('Server save error:', err);
-      // Retry once after 2s
-      return new Promise(function(resolve) {
-        setTimeout(function() {
-          fetch('/api/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              conversations: state.conversations,
-              currentId: state.currentId,
-              deletedIds: state.deletedIds || []
-            })
-          }).then(resolve).catch(resolve);
-        }, 2000);
-      });
-    });
-  });
-}
+// 生图请求构建（_IMAGE_SIZE_MAP/buildImageSizeConfig/buildImageRequestPayload/base64ToBytes） 已迁移到 image-gen.js
+
+// 核心生图函数（generateImage/fetchImageAsDataUrl） 已迁移到 image-gen.js
+
+// 图库清空与生图界面初始化（clearImageGallery/initImageView） 已迁移到 image-gen.js
+
+// 生图完成通知（notifyImageComplete） 已迁移到 image-gen.js
+
+
+// save / _saveQueue 已迁移到 db.js
 
 async function loadData() {
   // Try IndexedDB first
@@ -682,90 +265,68 @@ async function loadFromServer() {
   return false;
 }
 
-function migrateV1toV2(conv) {
-  const map = {};
-  const oldMsgs = conv.messages || [];
-  if (oldMsgs.length === 0) {
-    const rootId = uid();
-    map[rootId] = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
-    conv.rootId = rootId;
-    conv.activePath = [rootId];
-    conv.messageMap = map;
-    delete conv.messages;
-    return;
-  }
-  // Build tree from linear array
-  const rootId = uid();
-  map[rootId] = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
-  let prevId = rootId;
-  const path = [rootId];
-  for (const m of oldMsgs) {
-    const id = m.id || uid();
-    map[id] = {
-      ...m,
-      parentId: prevId,
-      children: [],
-      wordCount: countWords(m.content || ''),
-      versions: m.versions || [{ content: m.content || '', timestamp: Date.now(), reason: 'original' }],
-      activeVersion: m.activeVersion || 0
-    };
-    map[prevId].children.push(id);
-    prevId = id;
-    path.push(id);
-  }
-  conv.rootId = rootId;
-  conv.activePath = path;
-  conv.messageMap = map;
-  delete conv.messages;
-}
 
-function loadSettings() {
+// defaultSettings / migrateSettings 已迁移到 db.js
+
+// 从 IndexedDB 异步加载 settings，首次启动时从旧 localStorage 迁移
+// init() 中 await 调用；失败时使用内存中的默认值，不阻断启动
+async function initSettings() {
+  // 1. 先尝试从 IDB 读
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch(e) {}
-  return { thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6', directMode: false };
+    var idbData = await idbGet(SETTINGS_IDB_KEY);
+    if (idbData && typeof idbData === 'object') {
+      settings = migrateSettings(idbData);
+      _settingsLoaded = true;
+      return;
+    }
+  } catch(e) { console.warn('initSettings: IDB read failed:', e); }
+
+  // 2. IDB 无数据：尝试从旧 localStorage 迁移（仅一次）
+  try {
+    var raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) {
+      var s = JSON.parse(raw);
+      settings = migrateSettings(s);
+      // 写入 IDB，迁移成功后清理 localStorage
+      try {
+        await idbPut(SETTINGS_IDB_KEY, settings);
+        localStorage.removeItem(SETTINGS_KEY);
+        console.log('[chat-lite] settings 已从 localStorage 迁移到 IndexedDB');
+      } catch(e2) {
+        console.warn('[chat-lite] settings 迁移到 IDB 失败，保留 localStorage:', e2);
+      }
+      _settingsLoaded = true;
+      return;
+    }
+  } catch(e) { console.warn('initSettings: localStorage 迁移失败:', e); }
+
+  // 3. 都没有：使用默认值
+  settings = defaultSettings();
+  _settingsLoaded = true;
 }
 
-function saveSettings() {
-  settings.directMode = document.getElementById('direct-mode-check')?.checked || false;
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+// 状态栏有效值（直接读 conv，兼容旧 template 字段名）
+function effectiveStatusBar(conv) {
+  var sb = (conv && conv.statusBar) || null;
+  if (!sb) return { enabled: false, templateRule: '', displayFields: '', position: 'bottom' };
+  if (sb.template && !sb.templateRule) sb.templateRule = sb.template;
+  return sb;
 }
+// B2: 读取模型级修饰语（考虑会话级禁用/覆盖）
+function effectiveModelPrompt(conv) {
+  if (!conv) return null;
+  if (conv.modelPromptDisabled) return null;
+  if (conv.modelPromptOverride) return { text: conv.modelPromptOverride };
+  if (!settings.modelPrompts) return null;
+  var key = (conv.providerId || '') + ':' + (conv.model || '');
+  return settings.modelPrompts[key] || null;
+}
+
+// saveSettings 已迁移到 db.js
 
 // ===== Conversation Model =====
-function newConversation() {
-  const msgId = uid();
-  const rootMsg = {
-    id: msgId, role: 'system', content: '',
-    parentId: null, children: [],
-    title: '对话根节点', wordCount: 0,
-    versions: [{ content: '', timestamp: Date.now(), reason: 'original' }],
-    activeVersion: 0, files: [], editing: false, createdAt: Date.now()
-  };
-  return {
-    id: uid(),
-    title: '新对话',
-    model: (state.providers && state.providers[0] && state.providers[0].models && state.providers[0].models[0] && state.providers[0].models[0].id) || 'deepseek-v4-flash',
-    providerId: (state.providers && state.providers[0] && state.providers[0].id) || null,
-    thinkingEnabled: settings.thinkingEnabled,
-    systemPrompt: '',
-    userIdentity: '',
-    rootId: msgId,
-    activePath: [msgId],
-    messageMap: { [msgId]: rootMsg },
-    createdAt: Date.now()
-  };
-}
 
 // Tree helpers
-function getMsg(conv, id) { return conv.messageMap[id]; }
-function getActiveChain(conv) {
-  return conv.activePath.map(id => conv.messageMap[id]).filter(Boolean);
-}
-function getLastActiveMsg(conv) {
-  const chain = getActiveChain(conv);
-  return chain[chain.length - 1] || null;
-}
 function countWords(text) { return (text || '').length; }
 
 // ===== Background Image =====
@@ -804,8 +365,10 @@ function applyBackgroundImage() {
     bgEl.style.backgroundImage = '';
     bgEl.classList.remove('active');
   }
+  // 应用背景遮罩透明度（会话独立）
   const overlay = conv && conv.bgOverlay != null ? conv.bgOverlay : 0.3;
   bgEl.style.setProperty('--bg-overlay', overlay);
+  // 同步设置面板里的滑块值
   const slider = document.getElementById('bg-overlay-slider');
   const valueEl = document.getElementById('bg-overlay-value');
   if (slider) slider.value = overlay;
@@ -831,31 +394,6 @@ function removeBackgroundImage() {
   applyBackgroundImage();
 }
 
-function computeBranchWords(conv, fromId) {
-  let total = 0, visited = new Set(), stack = [fromId];
-  while (stack.length) {
-    const id = stack.pop();
-    if (visited.has(id)) continue;
-    visited.add(id);
-    const msg = conv.messageMap[id];
-    if (msg) {
-      total += countWords(msg.content);
-      stack.push(...(msg.children || []));
-    }
-  }
-  return total;
-}
-function getBranchPath(conv, leafId) {
-  const path = [];
-  let current = leafId;
-  while (current) {
-    path.unshift(current);
-    const msg = conv.messageMap[current];
-    if (!msg || !msg.parentId) break;
-    current = msg.parentId;
-  }
-  return path;
-}
 
 // ===== DOM refs =====
 const $ = id => document.getElementById(id);
@@ -882,11 +420,15 @@ const apiKeyInput = null; // deprecated, providers managed separately
 
 // ===== Init =====
 async function init() {
-  await loadData(); // IndexedDB (async)
+  await loadData(); // IndexedDB (async) — 加载 conversations
+  await initSettings(); // IndexedDB — 加载 settings（首次启动从 localStorage 迁移）
   state._dataLoaded = true;
   state.deletedIds = state.deletedIds || [];
   // Server is source of truth — always prefer server data
-  await loadFromServer();
+  // APK 模式无后端，跳过
+  if (!isCapacitor()) {
+    await loadFromServer();
+  }
   // Migrate any old-format conversations
   for (const conv of state.conversations) {
     if (conv.messages && Array.isArray(conv.messages) && !conv.messageMap) {
@@ -899,17 +441,35 @@ async function init() {
   migrateOldApiKey();
   renderModelSelector();
 
+  // F1: 启动时迁移旧图片数据（localStorage 中残留 dataUrl 的图片转存 Filesystem）
+  if (isCapacitor() && CapFilesystem && Array.isArray(settings.images)) {
+    migrateImportedImagesToFilesystem();
+  }
+
+  // v70: 预申请通知权限（Android 13+ 需运行时授权，启动时在前台申请确保弹窗可见）
+  if (isCapacitor() && Capacitor.Plugins && Capacitor.Plugins.LocalNotifications) {
+    Capacitor.Plugins.LocalNotifications.requestPermissions().then(function(perm) {
+      console.log('[Notify] permission:', perm.display);
+    }).catch(function(e) { console.warn('[Notify] permission request failed:', e); });
+  }
+
   // Apply settings to UI
   thinkingToggle.checked = settings.thinkingEnabled;
+  // 初始化流式模式选择器
+  const streamingModeSelect = document.getElementById('native-streaming-mode-select');
+  if (streamingModeSelect) streamingModeSelect.value = settings.nativeStreamingMode || 'auto';
+  // C3: 振感开关回填（默认开；老用户 settings 无此字段时按默认开处理）
+  const hapticCheck = document.getElementById('haptic-feedback-check');
+  if (hapticCheck) hapticCheck.checked = (settings.hapticFeedback !== false);
   applyDisplaySettings();
 
-  // Thinking toggle auto-saves immediately
+  // Thinking toggle auto-saves immediately (会话级)
   thinkingToggle.addEventListener('change', () => {
     settings.thinkingEnabled = thinkingToggle.checked;
     saveSettings();
     const conv = currentConv();
     if (conv) {
-      conv.thinkingEnabled = settings.thinkingEnabled;
+      conv.thinkingEnabled = thinkingToggle.checked;
       save();
     }
   });
@@ -919,6 +479,39 @@ async function init() {
   renderSidebar();
   renderMessages();
   applyBackgroundImage();
+
+  // Capacitor 模式标记（CSS 用，隐藏 .web-only 元素）
+  if (isCapacitor()) {
+    document.body.classList.add('capacitor-mode');
+    console.log('[chat-lite] Running in Capacitor (APK) mode');
+  } else {
+    console.log('[chat-lite] Running in Web mode');
+  }
+
+  // 触摸滚动监听：流式输出时，用户触摸滚动暂停 DOM 更新，松手后恢复
+  // 避免 innerHTML 重建阻塞 touchmove 导致滚动不跟手
+  messagesEl.addEventListener('touchstart', function() {
+    state._isTouching = true;
+  }, { passive: true });
+  messagesEl.addEventListener('touchend', function() {
+    state._isTouching = false;
+    // 松手后立即渲染最新的流式内容
+    if (state._streamingMsg) {
+      updateMessageContent(state._streamingMsg.id, state._streamingMsg.content, state._streamingMsg.reasoningContent || '');
+      // 如果在底部附近，滚到底
+      const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+      if (distFromBottom < 150) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    }
+  }, { passive: true });
+
+  // 淡出开屏动画
+  var splash = document.getElementById('splash-screen');
+  if (splash) {
+    splash.classList.add('fade-out');
+    setTimeout(function() { if (splash.parentNode) splash.parentNode.removeChild(splash); }, 300);
+  }
 
   // PWA install prompt handler
   var deferredPrompt;
@@ -978,7 +571,7 @@ async function init() {
   $('btn-export').addEventListener('click', exportConversation);
   $('btn-import').addEventListener('click', () => { document.getElementById('import-file-input').click(); });
   document.getElementById('import-file-input').addEventListener('change', importConversation);
-  // 全量导出/导入按钮
+  // 全量导出/导入按钮（APK 迁移用，按钮在设置面板里）
   var btnExportAll = document.getElementById('btn-export-all');
   if (btnExportAll) btnExportAll.addEventListener('click', exportAllData);
   var btnImportAll = document.getElementById('btn-import-all');
@@ -1020,6 +613,8 @@ async function init() {
     e.target.value = '';
   });
   $('btn-remove-bg').addEventListener('click', removeBackgroundImage);
+
+  // 背景遮罩透明度（会话独立）
   $('bg-overlay-slider').addEventListener('input', (e) => {
     const conv = currentConv();
     if (!conv) return;
@@ -1030,13 +625,51 @@ async function init() {
   });
   $('bg-overlay-slider').addEventListener('change', () => { save(); });
 
-  // Status bar toggle
+  // Status bar toggle (B3: 含 displayFields 行控制)
   $('statusbar-toggle').addEventListener('change', function() {
     var show = this.checked;
     $('statusbar-template-row').style.display = show ? '' : 'none';
+    var dfRow = document.getElementById('statusbar-display-fields-row');
+    if (dfRow) dfRow.style.display = show ? '' : 'none';
     $('statusbar-template-hint').style.display = show ? '' : 'none';
     $('statusbar-position-row').style.display = show ? '' : 'none';
   });
+
+  // 模型修饰复选框：本会话自定义
+  var mpOverrideCheck = document.getElementById('model-prompt-override-check');
+  if (mpOverrideCheck) {
+    mpOverrideCheck.addEventListener('change', function() {
+      var row = document.getElementById('model-prompt-override-row');
+      if (row) row.style.display = this.checked ? '' : 'none';
+    });
+  }
+
+  // 设置面板快速回顶/底按钮（滚动容器是 #settings-body；按钮挂在 settings-content 上不随内容滚）
+  var settingsScrollCt = document.getElementById('settings-body');
+  var settingsScrollBtn = document.getElementById('settings-scroll-btn');
+  if (settingsScrollCt && settingsScrollBtn) {
+    var updateScrollBtn = function() {
+      var nearTop = settingsScrollCt.scrollTop < 200;
+      var nearBottom = settingsScrollCt.scrollTop + settingsScrollCt.clientHeight >= settingsScrollCt.scrollHeight - 200;
+      settingsScrollBtn.style.display = (nearTop && nearBottom) ? 'none' : '';
+      settingsScrollBtn.innerHTML = (nearBottom && !nearTop) ? '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg>' : '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+    };
+    settingsScrollCt.addEventListener('scroll', updateScrollBtn);
+    settingsScrollBtn.addEventListener('click', function() {
+      var nearTop = settingsScrollCt.scrollTop < 200;
+      var nearBottom = settingsScrollCt.scrollTop + settingsScrollCt.clientHeight >= settingsScrollCt.scrollHeight - 200;
+      if (nearBottom && !nearTop) {
+        settingsScrollCt.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        settingsScrollCt.scrollTo({ top: settingsScrollCt.scrollHeight, behavior: 'smooth' });
+      }
+    });
+    // 打开面板时初始触发一次，避免按钮一直 display:none
+    state._updateSettingsScrollBtn = updateScrollBtn;
+  }
+
+  // F1: 初始化生图界面事件监听
+  initImageView();
 
   // Long press + drag to reorder conversations
   let longPressTimer = null;
@@ -1187,17 +820,6 @@ function currentConv() {
   return state.conversations.find(c => c.id === state.currentId);
 }
 
-function restoreConversationState() {
-  if (state.conversations.length === 0) {
-    const conv = newConversation();
-    conv.title = '对话 1';
-    conv.thinkingEnabled = settings.thinkingEnabled;
-    state.conversations.push(conv);
-    state.currentId = conv.id;
-    save();
-  }
-}
-
 
   // Character card: import PNG
   $('btn-import-card').addEventListener('click', () => { document.getElementById('card-import-file').click(); });
@@ -1282,164 +904,17 @@ function restoreConversationState() {
     document.getElementById(id).addEventListener('input', updateCardPreview);
   });
 
-function updateCardPreview() {
-  var f = {
-    name: document.getElementById('card-name').value,
-    description: document.getElementById('card-desc').value,
-    personality: document.getElementById('card-personality').value,
-    scenario: document.getElementById('card-scenario').value,
-    first_mes: document.getElementById('card-firstmes').value,
-    mes_example: document.getElementById('card-example').value,
-    system_prompt: document.getElementById('card-sysprompt').value
-  };
-  var p = buildCardPrompt(f);
-  document.getElementById('card-preview').textContent = p || '(预览系统提示词)';
-  return p;
-}
-
-
 
 // ===== Conflict resolution =====
-function showConflictDialog(conflicts) {
-  return new Promise(function(resolve) {
-    var overlay = document.getElementById('conflict-dialog');
-    var msg = document.getElementById('conflict-msg');
-    var summary = document.getElementById('conflict-summary');
-    
-    // Build summary of conflicts
-    var items = conflicts.map(function(cf) {
-      var localTime = new Date(cf.local.updatedAt || 0).toLocaleTimeString();
-      var serverTime = new Date(cf.server.updatedAt || 0).toLocaleTimeString();
-      var localPreview = (cf.local.title || '无标题').substring(0, 40);
-      var serverPreview = (cf.server.title || '无标题').substring(0, 40);
-      return '<div class="conflict-item">' +
-        '<div class="diff-head">' + localPreview + '</div>' +
-        '<div class="diff-preview">本地修改: ' + localTime + '</div>' +
-        '<div class="diff-preview">服务端修改: ' + serverTime + '</div>' +
-        '</div>';
-    }).join('');
-    
-    msg.textContent = '发现 ' + conflicts.length + ' 个对话在两边都有修改，请选择保留哪一方的数据：';
-    summary.innerHTML = items;
-    overlay.style.display = 'flex';
-    
-    function finish(choice) {
-      overlay.style.display = 'none';
-      // Clean up listeners
-      var localBtn = document.getElementById('btn-conflict-local');
-      var serverBtn = document.getElementById('btn-conflict-server');
-      var cancelBtn = document.getElementById('btn-conflict-cancel');
-      localBtn.replaceWith(localBtn.cloneNode(true));
-      serverBtn.replaceWith(serverBtn.cloneNode(true));
-      cancelBtn.replaceWith(cancelBtn.cloneNode(true));
-      resolve(choice);
-    }
-    
-    document.getElementById('btn-conflict-local').addEventListener('click', function() {
-      finish('local');
-    }, {once: true});
-    
-    document.getElementById('btn-conflict-server').addEventListener('click', function() {
-      finish('server');
-    }, {once: true});
-    
-    document.getElementById('btn-conflict-cancel').addEventListener('click', function() {
-      finish('cancel');
-    }, {once: true});
-  });
-}
 
 
 // ===== Sidebar =====
-function renderSidebar() {
-  const query = (document.getElementById('conv-search-input')?.value || '').trim().toLowerCase();
-  const filtered = query 
-    ? state.conversations.filter(c => c.title.toLowerCase().includes(query))
-    : state.conversations;
-  convList.innerHTML = filtered.map(c =>
-    `<div class="conv-item${c.id === state.currentId ? ' active' : ''}" data-id="${c.id}">
-      <span class="conv-title">${escapeHtml(c.title)}</span>
-      <button class="del-btn" data-id="${c.id}" title="删除"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg></button>
-    </div>`
-  ).join('');
 
-  // Click to switch
-  convList.querySelectorAll('.conv-item').forEach(el => {
-    el.addEventListener('click', (e) => {
-      if (isLongPress) { isLongPress = false; return; }
-      if (e.target.classList.contains('del-btn')) return;
-      if (e.target.tagName === 'INPUT') return;
-      switchConversation(el.dataset.id);
-    });
-  });
-
-  // Rename conversation — only on long-press
-  convList.querySelectorAll('.conv-title').forEach(span => {
-    span.addEventListener('click', (e) => {
-      const convItem = span.closest('.conv-item');
-      if (!convItem || !convItem.classList.contains('long-press')) return;
-      e.stopPropagation();
-      const id = convItem.dataset.id;
-      const conv = state.conversations.find(c => c.id === id);
-      if (!conv) return;
-      const oldTitle = conv.title;
-      const input = document.createElement('input');
-      input.className = 'conv-rename-input';
-      input.value = oldTitle;
-      input.addEventListener('blur', () => {
-        conv.title = input.value.trim() || oldTitle;
-        conv.updatedAt = Date.now();
-        save();
-        renderSidebar();
-      });
-      input.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter') input.blur();
-        if (ev.key === 'Escape') { input.value = oldTitle; input.blur(); }
-      });
-      span.innerHTML = '';
-      span.appendChild(input);
-      input.focus();
-      input.select();
-    });
-  });
-
-  // Delete
-  convList.querySelectorAll('.del-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.id;
-      state.deletedIds = state.deletedIds || [];
-      if (state.deletedIds.indexOf(id) < 0) state.deletedIds.push(id);
-      if (state.conversations.length <= 1) { newChat(); return; }
-      state.conversations = state.conversations.filter(c => c.id !== id);
-      if (state.currentId === id) {
-        state.currentId = state.conversations[state.conversations.length - 1].id;
-        restoreConversationState();
-      }
-      save();
-      renderSidebar();
-      renderMessages();
-      applyBackgroundImage();
-      syncModelSelector();
-    });
-  });
-}
-
-function switchConversation(id) {
-  if (state.loading) return;
-  state.currentId = id;
-  save();
-  renderSidebar();
-  renderMessages();
-  applyBackgroundImage();
-  syncModelSelector();
-}
 
 function newChat() {
   if (state.loading) return;
   const conv = newConversation();
   conv.title = `对话 ${state.conversations.length + 1}`;
-  conv.thinkingEnabled = settings.thinkingEnabled;
   state.conversations.push(conv);
   state.currentId = conv.id;
   save();
@@ -1451,309 +926,58 @@ function newChat() {
 }
 
 // ===== Breadcrumb =====
-function renderBreadcrumb(conv) {
-  const bar = document.getElementById('breadcrumb-bar');
-  if (!bar) return;
-  const chain = getActiveChain(conv);
-  const display = chain.filter(m => m && m.role !== 'system');
-  if (display.length < 1) { bar.innerHTML = ''; bar.style.display = 'none'; return; }
-  bar.style.display = 'flex';
-  let html = '';
-  display.forEach((m, i) => {
-    const label = m.title || m.content.substring(0, 20) + (m.content.length > 20 ? '...' : '') || '(空)';
-    const icon = m.role === 'user' ? ICON.user : ICON.bot;
-    const isLast = i === display.length - 1;
-    // Show sibling count if this is the last node and parent has multiple children
-    const children = m.children || [];
-    const siblingLabel = (isLast && children.length > 1) ? ` +${children.length - 1}` : '';
-    html += `<span class="breadcrumb-segment${isLast ? ' active' : ''}" data-id="${m.id}">${icon} ${escapeHtml(label)}${siblingLabel ? `<span style="font-size:10px;color:var(--text2)">${siblingLabel}</span>` : ''}</span>`;
-    if (!isLast) html += '<span class="breadcrumb-sep">▸</span>';
-  });
-  bar.innerHTML = html;
-  bar.querySelectorAll('.breadcrumb-segment').forEach(el => {
-    el.addEventListener('click', () => {
-      const id = el.dataset.id;
-      const newPath = getBranchPath(conv, id);
-      conv.activePath = newPath;
-      save();
-      renderMessages();
-      renderBreadcrumb(conv);
-    });
-  });
-}
 
 // ===== Messages Rendering =====
-function renderMessages() {
-  const conv = currentConv();
-  messagesEl.innerHTML = '';
-  emptyState.style.display = 'none';
-
-  if (!conv || !conv.rootId) {
-    emptyState.style.display = 'block';
-    return;
-  }
-
-  const chain = getActiveChain(conv);
-  // Filter out root system message for display
-  const displayMsgs = chain.filter(m => m && m.role !== 'system');
-
-  if (displayMsgs.length === 0) {
-    emptyState.style.display = 'block';
-    return;
-  }
-
-  displayMsgs.forEach((msg, idx) => {
-    const isLastMsg = idx === displayMsgs.length - 1;
-    const isSelected = state.selectedMsgId === msg.id;
-    const div = document.createElement('div');
-    div.className = `message ${msg.role}${msg.editing ? ' message-editing' : ''}${isSelected ? ' msg-selected' : ''}`;
-    div.dataset.id = msg.id;
-
-    const content = msg.editing ? renderEditMode(msg) : renderContent(msg);
-    const deleteBtnHtml = `<button class="msg-action-btn delete-btn" title="删除">删除</button>`;
-
-    div.innerHTML = `
-      <div class="msg-bubble">
-        ${msg.title && msg.title !== '对话根节点' ? `<div class="msg-title">${escapeHtml(msg.title)}</div>` : ''}
-        ${content}
-        ${renderSiblingArrows(msg, conv)}
-        ${msg.role === 'assistant' && !msg.editing ? `
-        <div class="msg-actions">
-          <button class="msg-action-btn edit-btn" title="编辑">编辑</button>
-          <button class="msg-action-btn regenerate-btn" title="重新生成" ${state.loading ? 'disabled' : ''}>重试</button>
-          <button class="msg-action-btn copy-btn" title="复制全文">复制</button>
-          ${deleteBtnHtml}
-        </div>` : ''}
-        ${msg.role === 'user' && !msg.editing && !msg.isFileOnly ? `
-        <div class="msg-actions">
-          <button class="msg-action-btn edit-btn" title="编辑">编辑</button>
-          <button class="msg-action-btn copy-btn" title="复制全文">复制</button>
-          ${deleteBtnHtml}
-        </div>` : ''}
-      </div>
-    `;
-
-    messagesEl.appendChild(div);
-
-    const bubble = div.querySelector('.msg-bubble');
-    addLongPress(bubble, () => {
-      state.selectedMsgId = msg.id;
-      renderMessages();
-    });
-    bubble.addEventListener('contextmenu', (e) => e.preventDefault());
-
-    const editBtn = div.querySelector('.edit-btn');
-    if (editBtn) editBtn.addEventListener('click', () => enterEditMode(msg.id));
-
-    const regenBtn = div.querySelector('.regenerate-btn');
-    if (regenBtn) regenBtn.addEventListener('click', () => regenerate(msg.id));
-
-    const deleteBtn = div.querySelector('.delete-btn');
-    if (deleteBtn) deleteBtn.addEventListener('click', () => deleteMessage(msg.id));
-
-    const copyBtn = div.querySelector('.copy-btn');
-    if (copyBtn) copyBtn.addEventListener('click', () => {
-      var text = msg.content || '';
-      navigator.clipboard.writeText(text).then(() => {
-        copyBtn.textContent = '已复制';
-        setTimeout(() => { copyBtn.textContent = '复制'; }, 1500);
-      }).catch(() => {});
-    });
-
-    if (msg.editing) {
-      const textarea = div.querySelector('.msg-edit-textarea');
-      const saveBtn = div.querySelector('.save-btn');
-      const cancelBtn = div.querySelector('.cancel-btn');
-      if (textarea) {
-        textarea.focus();
-        textarea.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(msg.id, textarea.value); }
-          if (e.key === 'Escape') cancelEdit(msg.id);
-        });
-      }
-      if (saveBtn) saveBtn.addEventListener('click', () => saveEdit(msg.id, textarea?.value || ''));
-      if (cancelBtn) cancelBtn.addEventListener('click', () => cancelEdit(msg.id));
-    }
-  });
-
-  scrollToBottom();
-}
 
 // ===== Long press helper =====
-function addLongPress(el, callback) {
-  let timer = null;
-  let startX = 0;
-  let startY = 0;
-  const threshold = 600; // ms
-  const moveThreshold = 15; // px
 
-  const start = (e) => {
-    const touch = e.touches ? e.touches[0] : e;
-    startX = touch.clientX;
-    startY = touch.clientY;
-    timer = setTimeout(() => {
-      timer = null;
-      callback();
-    }, threshold);
+// ===== A6+D6+D7: 气泡自定义上下文菜单 =====
+// 接管 contextmenu + addLongPress，含 4 种复制变体 + 复制选中文字
+
+
+// 提取 AI 正文：去掉 <status>...</status> 标签
+
+// 提取 markdown 代码块内容（去围栏）
+
+// 复制成功反馈：复用 setStatus('saved') 机制
+
+// 流式振感反馈（_initStreamHaptics / triggerHapticFeedback 及五档常量）已迁移到 haptics.js
+// ===== C1: 回到底部按钮 =====
+// 距底 >200px 显示，<200px 隐藏；点击平滑滚到底
+function initScrollBottomButton() {
+  if (document.getElementById('btn-scroll-bottom')) return;
+  const btn = document.createElement('button');
+  btn.id = 'btn-scroll-bottom';
+  btn.className = 'btn-scroll-bottom';
+  btn.title = '回到底部';
+  btn.setAttribute('aria-label', '回到底部');
+  btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+  btn.style.display = 'none';
+  // 插到 input-area 之前（浮在 input 上方右侧）
+  const inputArea = document.getElementById('input-area');
+  if (inputArea && inputArea.parentNode) {
+    inputArea.parentNode.insertBefore(btn, inputArea);
+  } else {
+    document.body.appendChild(btn);
+  }
+  // 监听滚动
+  const onScroll = function() {
+    const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+    btn.style.display = (distFromBottom > 200) ? 'flex' : 'none';
   };
-
-  const cancel = () => {
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-    }
-  };
-
-  const move = (e) => {
-    if (!timer) return;
-    const touch = e.touches ? e.touches[0] : e;
-    if (Math.abs(touch.clientX - startX) > moveThreshold || Math.abs(touch.clientY - startY) > moveThreshold) {
-      cancel();
-    }
-  };
-
-  el.addEventListener('mousedown', start);
-  el.addEventListener('touchstart', start, { passive: true });
-  el.addEventListener('mouseup', cancel);
-  el.addEventListener('mouseleave', cancel);
-  el.addEventListener('touchmove', move, { passive: true });
-  el.addEventListener('touchend', cancel);
-  el.addEventListener('touchcancel', cancel);
+  messagesEl.addEventListener('scroll', onScroll, { passive: true });
+  // 点击平滑滚到底
+  btn.addEventListener('click', function() {
+    messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+    btn.style.display = 'none';
+  });
+  // 初始检查一次
+  requestAnimationFrame(onScroll);
 }
+document.addEventListener('DOMContentLoaded', initScrollBottomButton);
 
 // Sibling navigation (branch switching)
-function renderSiblingArrows(msg, conv) {
-  const parent = getMsg(conv, msg.parentId);
-  if (!parent || !parent.children || parent.children.length <= 1) return '';
-  const siblings = parent.children;
-  const idx = siblings.indexOf(msg.id);
-  if (idx < 0) return '';
-  return `<span class="version-arrows branch-nav">
-    <button class="version-arrow" onclick="switchSibling('${msg.id}', -1)" ${idx === 0 ? 'disabled' : ''}>◀</button>
-    <span class="version-label">${idx + 1}/${siblings.length}</span>
-    <button class="version-arrow" onclick="switchSibling('${msg.id}', 1)" ${idx >= siblings.length - 1 ? 'disabled' : ''}>▶</button>
-  </span>`;
-}
 
-window.switchSibling = function(currentId, direction) {
-  const conv = currentConv();
-  if (!conv) return;
-  const msg = getMsg(conv, currentId);
-  if (!msg) return;
-  const parent = getMsg(conv, msg.parentId);
-  if (!parent || !parent.children) return;
-  const siblings = parent.children;
-  const idx = siblings.indexOf(currentId);
-  if (idx < 0) return;
-  const newIdx = idx + direction;
-  if (newIdx < 0 || newIdx >= siblings.length) return;
-  
-  const newId = siblings[newIdx];
-  const pathIdx = conv.activePath.indexOf(currentId);
-  if (pathIdx >= 0) {
-    conv.activePath[pathIdx] = newId;
-    // Truncate any subsequent messages in activePath (they belong to old branch)
-    conv.activePath = conv.activePath.slice(0, pathIdx + 1);
-    // Append the new branch's children path
-    appendChildPath(conv, newId);
-  }
-  save();
-  renderMessages();
-  renderBreadcrumb(conv);
-};
-
-function appendChildPath(conv, fromId) {
-  const msg = conv.messageMap[fromId];
-  if (!msg || !msg.children || msg.children.length === 0) return;
-  // Follow the first child (preferred path)
-  const nextId = msg.children[0];
-  conv.activePath.push(nextId);
-  appendChildPath(conv, nextId);
-}
-
-function renderContent(msg) {
-  let html = '';
-
-  // Reasoning content (collapsible, if exists)
-  if (msg.reasoningContent) {
-    html += `<details class="reasoning-details">
-      <summary class="reasoning-summary">思考过程</summary>
-      <div class="reasoning-content">${escapeHtml(msg.reasoningContent)}</div>
-    </details>`;
-  }
-
-  // File attachments
-  if (msg.files && msg.files.length > 0) {
-    html += msg.files.map(f =>
-      `<div class="file-tag" style="margin-bottom:4px">${escapeHtml(f.name)} (${formatSize(f.size)})</div>`
-    ).join('');
-  }
-
-  if (msg.isFileOnly) return html;
-
-  // Markdown content
-  const rendered = marked.parse(msg.content || '', { breaks: true, gfm: true });
-  html += rendered;
-
-  // Status bar: extract <status>...</status> and render as styled block
-  // Use lastIndexOf to find the LAST <status> tag (avoid matching examples in debug output)
-  var content = msg.content || '';
-  var lastStatusStart = content.lastIndexOf('<status>');
-  var lastStatusEnd = content.lastIndexOf('</status>');
-  var statusMatch = null;
-  if (lastStatusStart !== -1 && lastStatusEnd !== -1 && lastStatusEnd > lastStatusStart) {
-    statusMatch = [content.slice(lastStatusStart, lastStatusEnd + '</status>'.length), content.slice(lastStatusStart + '<status>'.length, lastStatusEnd)];
-  }
-  if (statusMatch) {
-    var statusHtml = marked.parse(statusMatch[1].trim(), { breaks: true, gfm: true });
-    var conv = currentConv();
-    var position = (conv?.statusBar?.position) || 'bottom';
-    var statusBarHtml = '<div class="status-bar status-bar-' + position + '">' + statusHtml + '</div>';
-    if (position === 'top') {
-      // Insert after reasoning, before main content
-      var reasoningEnd = html.indexOf('</details>');
-      if (reasoningEnd !== -1) {
-        reasoningEnd += '</details>'.length;
-        html = html.slice(0, reasoningEnd) + statusBarHtml + html.slice(reasoningEnd);
-      } else {
-        html = statusBarHtml + html;
-      }
-    } else {
-      html += statusBarHtml;
-    }
-    // Remove the raw <status> tags from rendered content
-    html = html.replace(/&lt;status&gt;[\s\S]*?&lt;\/status&gt;/g, '');
-    html = html.replace(/<status>[\s\S]*?<\/status>/g, '');
-  }
-
-  // Word count
-  const wc = countWords(msg.content || '');
-  if (wc > 0) {
-    html += `<span class="msg-wordcount">${wc}字</span>`;
-  }
-
-  // Interrupted marker + continue button
-  if (msg.interrupted) {
-    const reason = msg.errorMsg ? escapeHtml(msg.errorMsg) : '生成中断';
-    html += `<div class="interrupted-bar">
-      <span class="interrupted-reason">⚠ ${reason}</span>
-      <button class="continue-btn" onclick="continueGeneration('${msg.id}')">继续生成</button>
-    </div>`;
-  }
-
-  return html;
-}
-
-function renderEditMode(msg) {
-  return `<div class="edit-wrap">
-    <textarea class="msg-edit-textarea" id="edit-ta-${msg.id}">${escapeHtml(msg.content)}</textarea>
-    <div class="edit-resize-handle" data-for="${msg.id}"></div>
-    <div class="edit-actions">
-      <button class="save-btn">保存</button>
-      <button class="cancel-btn">取消</button>
-    </div>
-  </div>`;
-}
 
 // Touch-friendly resize for edit textarea
 document.addEventListener('DOMContentLoaded', () => {
@@ -1798,835 +1022,51 @@ function onResizeStart(e) {
 
 function scrollToBottom() {
   requestAnimationFrame(() => {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    // 智能滚动：只在用户处于底部附近（150px 内）时才自动滚动
+    // 用户主动往上滑看历史内容时，不被强制拉回底部
+    const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+    if (distFromBottom < 150) {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
   });
 }
 
 // ===== Edit Message =====
-function enterEditMode(msgId) {
-  const conv = currentConv();
-  if (!conv) return;
-  const msg = getMsg(conv, msgId);
-  if (msg) { msg.editing = true; renderMessages(); }
-}
 
-function saveEdit(msgId, newContent) {
-  const conv = currentConv();
-  if (!conv || !conv.messageMap) return;
-  const msg = getMsg(conv, msgId);
-  if (!msg) return;
-
-  if (msg.role === 'assistant') {
-    const prevContent = msg.content;
-    msg.versions.push({ content: prevContent, timestamp: Date.now(), reason: 'edited' });
-    msg.activeVersion = 0;
-    msg.content = newContent;
-    msg.wordCount = countWords(newContent);
-    msg.editing = false;
-    save();
-    renderMessages();
-    return;
-  }
-
-  // User message - save old as version, create new branch, trigger AI regen
-  if (newContent !== msg.content) {
-    // Save old content as a version in the original message
-    msg.versions.push({ content: msg.content, timestamp: Date.now(), reason: 'edited' });
-    msg.activeVersion = 0;
-    
-    // Create a NEW node as sibling for the edited content
-    var newId = uid();
-    var newMsg = {
-      id: newId,
-      role: 'user',
-      content: newContent,
-      parentId: msg.parentId,
-      children: [],
-      title: newContent.substring(0, 30) + (newContent.length > 30 ? '...' : ''),
-      wordCount: countWords(newContent),
-      versions: [{ content: newContent, timestamp: Date.now(), reason: 'edited' }],
-      activeVersion: 0,
-      files: msg.files || [],
-      createdAt: Date.now()
-    };
-    conv.messageMap[newId] = newMsg;
-    
-    // The NEW message is a child of the same parent
-    var parent = getMsg(conv, msg.parentId);
-    if (parent) parent.children.push(newId);
-    
-    // Update activePath: replace old msgId with newId, truncate after
-    var mIdx = conv.activePath.indexOf(msgId);
-    if (mIdx >= 0) {
-      conv.activePath[mIdx] = newId;
-      conv.activePath = conv.activePath.slice(0, mIdx + 1);
-    }
-    
-    msg.editing = false;
-    save();
-    renderMessages();
-    
-    // Trigger AI regeneration for the new message (since it has no response)
-    var ctx = buildContext(conv);
-    setTimeout(function() { sendFromMessage(ctx); }, 100);
-    return;
-  }
-
-  msg.editing = false;
-  save();
-  renderMessages();
-}
-
-function cancelEdit(msgId) {
-  const conv = currentConv();
-  if (!conv) return;
-  const msg = getMsg(conv, msgId);
-  if (msg) { msg.editing = false; renderMessages(); }
-}
 
 // ===== Regenerate =====
-async function regenerate(msgId) {
-  if (state.loading) return;
-  const conv = currentConv();
-  if (!conv) return;
-  const msg = getMsg(conv, msgId);
-  if (!msg || msg.role !== 'assistant') return;
-
-  // Get parent user message
-  const parentId = msg.parentId;
-  const parent = getMsg(conv, parentId);
-
-  // Save old version then remove from active path
-  if (msg.content) {
-    msg.versions.push({ content: msg.content, timestamp: Date.now(), reason: 'regenerated' });
-    msg.activeVersion = 0;
-  }
-
-  // Pop this msg from active path
-  const idx = conv.activePath.indexOf(msgId);
-  if (idx >= 0) {
-    conv.activePath = conv.activePath.slice(0, idx);
-  }
-
-  save();
-  renderMessages();
-
-  const context = buildContext(conv);
-  await sendFromMessage(context);
-}
 
 // ===== Delete Message =====
-function deleteMessage(msgId) {
-  const conv = currentConv();
-  if (!conv || !conv.messageMap || !conv.messageMap[msgId]) return;
-
-  const msg = getMsg(conv, msgId);
-  if (!msg || !msg.parentId) {
-    showToast('根节点不能删除', 'warn');
-    return;
-  }
-
-  if (!confirm('确定删除这条消息及其所有分支吗？')) return;
-
-  // Collect all descendants to delete
-  const idsToDelete = new Set();
-  function collect(id) {
-    idsToDelete.add(id);
-    const node = conv.messageMap[id];
-    if (node && node.children) {
-      node.children.forEach(collect);
-    }
-  }
-  collect(msgId);
-
-  // Remove from parent's children list
-  const parent = getMsg(conv, msg.parentId);
-  if (parent && parent.children) {
-    parent.children = parent.children.filter(id => !idsToDelete.has(id));
-  }
-
-  // Delete nodes from messageMap
-  idsToDelete.forEach(id => {
-    delete conv.messageMap[id];
-  });
-
-  // Rebuild activePath: find the deletion point and try to switch to a sibling
-  const deleteIdx = conv.activePath.indexOf(msgId);
-  if (deleteIdx >= 0) {
-    // Truncate activePath to just before the deleted message
-    conv.activePath = conv.activePath.slice(0, deleteIdx);
-
-    // If parent has remaining children, switch to the first available sibling
-    if (parent && parent.children && parent.children.length > 0) {
-      const newChildId = parent.children[0];
-      // Walk down the first-child chain to rebuild a complete activePath
-      let cursor = newChildId;
-      while (cursor) {
-        conv.activePath.push(cursor);
-        const cursorNode = conv.messageMap[cursor];
-        cursor = (cursorNode && cursorNode.children && cursorNode.children.length > 0)
-          ? cursorNode.children[0]
-          : null;
-      }
-    }
-  } else {
-    // Deleted message was not on active path, just filter out any deleted ids
-    conv.activePath = conv.activePath.filter(id => !idsToDelete.has(id));
-  }
-
-  // Safety fallback
-  if (conv.activePath.length === 0) {
-    conv.activePath = [conv.rootId];
-  }
-
-  // If streaming is tied to a deleted message, stop loading state
-  if (state.loading && state.abortController) {
-    state.abortController.abort();
-    state.loading = false;
-    state.abortController = null;
-  }
-
-  state.selectedMsgId = null;
-  save();
-  renderMessages();
-  showToast('消息已删除');
-}
 
 // ===== Send Message =====
-async function sendMessage() {
-  const text = chatInput.innerText.trim();
-  if (!text && state.pendingFiles?.length === 0) return;
 
-  const conv = currentConv();
-  if (!conv || state.loading) return;
 
-  const files = state.pendingFiles || [];
-  state.pendingFiles = [];
+// ===== Capacitor 原生流式 HTTP（方案 C：capacitor-stream-http 插件）=====
+// 用 StreamHttp.startStream + chunk/end/error 事件实现真流式
+// 首字延迟从"等完整响应"降到"等模型开始输出"
+// 停止生成用 cancelStream 真正中断请求，不浪费 API 额度
 
-  // Get parent (last active message)
-  const parent = getLastActiveMsg(conv);
+// ===== 统一请求入口：根据配置选择方案 A（非流式）或方案 C（流式）=====
 
-  // Build user message
-  const userMsg = {
-    id: uid(),
-    role: 'user',
-    content: text,
-    parentId: parent ? parent.id : conv.rootId,
-    children: [],
-    title: text.substring(0, 30) + (text.length > 30 ? '...' : ''),
-    wordCount: countWords(text),
-    versions: [{ content: text, timestamp: Date.now(), reason: 'original' }],
-    activeVersion: 0,
-    files: files.map(f => ({ name: f.name, type: f.type, content: f.isImage ? f.content : f.content.slice(0, 500000), isImage: f.isImage, base64: f.base64, mimeType: f.mimeType, size: f.size })),
-    createdAt: Date.now()
-  };
+// ===== Capacitor 原生 HTTP（方案 A：非流式 + 打字动画）=====
+// 在 APK 模式下，fetch 流式不可靠，改用 CapacitorHttp 一次性请求 + typewriter 假动画
+// 停止生成：原生请求无法真正中断，用 state._nativeAborted 标记，响应到达后丢弃
 
-  // Add to tree
-  conv.messageMap[userMsg.id] = userMsg;
-  if (parent) {
-    parent.children.push(userMsg.id);
-  }
-  conv.activePath.push(userMsg.id);
+// 打字机效果：逐字显示新增内容
+// 性能优化：
+// - 动画过程中用 textContent 快速更新（O(1)，不解析 markdown）
+// - 每 300ms 做一次 markdown 渲染（marked.parse）
+// - 动画结束时最终完整渲染
+// - 不触发 save()（避免 IndexedDB 写入风暴）和 renderMessages()（避免全量重渲染）
 
-  chatInput.innerText = '';
-  updateSendButton();
-  clearFilePreview();
-  save();
-  renderMessages();
-
-  // Build API context
-  const context = buildContext(conv);
-  await sendFromMessage(context);
-}
-
-function buildContext(conv) {
-  const msgs = [];
-
-  // System prompt
-  const sysParts = [];
-  if (conv.systemPrompt) {
-    sysParts.push(conv.systemPrompt);
-  }
-  // Emphasis prompt (after system prompt, before status bar)
-  if (conv.emphasis) {
-    sysParts.push('【重要强调】' + conv.emphasis);
-  }
-  // Status bar instruction (before user identity)
-  if (conv.statusBar && conv.statusBar.enabled) {
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    var sbExample = sbTemplate.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
-    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>【角色状态】\\n' + sbExample + '\\n</status>');
-  }
-  if (conv.userIdentity) {
-    sysParts.push('用户身份：' + conv.userIdentity);
-  }
-  if (sysParts.length > 0) {
-    msgs.push({ role: 'system', content: sysParts.join('\n\n') });
-  }
-
-  // Message history from active path
-  const chain = getActiveChain(conv);
-  for (const m of chain) {
-    if (!m || m.role === 'system') continue;
-    let content = m.content;
-
-    // Process files (text and images)
-    content = buildFileContent(m);
-    msgs.push({ role: m.role, content });
-
-    // Mid-context injection: remind every 4 messages
-    if (conv.statusBar && conv.statusBar.enabled && msgs.length % 4 === 0) {
-      var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容包括：' + sbTemplate });
-    }
-  }
-
-  // Post-History Instruction: status bar reminder right before generation
-  if (conv.statusBar && conv.statusBar.enabled) {
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容包括：' + sbTemplate + '。这是强制格式要求，不可省略。' });
-    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容包括：' + sbTemplate + '。这是强制要求，不可省略。' });
-  }
-
-  return msgs;
-}
-
-async function sendFromMessage(context) {
-  const conv = currentConv();
-  if (!conv) return;
-
-  state.loading = true;
-  // Create AbortController for this request
-  state.abortController = new AbortController();
-  updateSendButton();
-  toggleSendStop();
-  setStatus('busy');
-
-  // Add placeholder assistant message (tree node)
-  const lastUser = getLastActiveMsg(conv);
-  const assistantMsg = {
-    id: uid(),
-    role: 'assistant',
-    content: '',
-    reasoningContent: '',
-    parentId: lastUser ? lastUser.id : conv.rootId,
-    children: [],
-    title: '回复',
-    wordCount: 0,
-    versions: [{ content: '', timestamp: Date.now(), reason: 'original' }],
-    activeVersion: 0,
-    files: [],
-    createdAt: Date.now()
-  };
-  conv.messageMap[assistantMsg.id] = assistantMsg;
-  if (lastUser) lastUser.children.push(assistantMsg.id);
-  conv.activePath.push(assistantMsg.id);
-  save();
-  renderMessages();
-
-  const lastMsgEl = messagesEl.lastElementChild;
-  if (lastMsgEl) {
-    const bubble = lastMsgEl.querySelector('.msg-bubble');
-    if (bubble) bubble.classList.add('cursor-blink');
-  }
-
-  try {
-    // Provider routing
-  var provider = getProvider(conv.providerId);
-  if (!provider) {
-    assistantMsg.content = '**错误：** 请先在设置中添加接口';
-    save(); renderMessages(); state.loading = false;
-    toggleSendStop(); scrollToBottom(); return;
-  }
-  var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
-  var useDirect = settings.directMode || !isLocal;
-
-  var reqBody = {
-    messages: context,
-    model: conv.model,
-    stream: true,
-    thinkingEnabled: conv.thinkingEnabled !== false
-  };
-
-  var req;
-  if (useDirect) {
-    req = buildUpstreamPayload(provider, reqBody);
-  } else {
-    req = {
-      url: '/api/chat/completions',
-      headers: { 'Content-Type': 'application/json' },
-      payload: Object.assign({}, reqBody, { provider: provider })
-    };
-  }
-
-  const resp = await fetch(req.url, {
-    method: 'POST',
-    headers: req.headers,
-    body: JSON.stringify(req.payload),
-    signal: state.abortController?.signal
-  });
-
-    if (!resp.ok) {
-      const err = await resp.json();
-      throw new Error(err.detail || err.error || `HTTP ${resp.status}`);
-    }
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let fullContent = '';
-    let fullReasoning = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
-        try {
-          const json = JSON.parse(data);
-          const delta = json.choices?.[0]?.delta;
-          if (delta) {
-            var reasoningText = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
-            if (reasoningText) {
-              fullReasoning += reasoningText;
-              assistantMsg.reasoningContent = fullReasoning;
-            }
-            if (delta.content) {
-              fullContent += delta.content;
-              assistantMsg.content = fullContent;
-            }
-            // Update display: pass both reasoning and content
-            updateMessageContent(assistantMsg.id, fullContent, fullReasoning);
-          }
-        } catch(e) {
-          // Skip malformed lines
-        }
-      }
-    }
-
-    // Update versions
-    assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'original' };
-    save();
-    setStatus('ok');
-
-  } catch (err) {
-    console.error('Send error:', err);
-    // 保留已生成内容，标记为中断
-    assistantMsg.interrupted = true;
-    assistantMsg.errorMsg = err.name === 'AbortError' ? '用户打断' : err.message;
-    if (!assistantMsg.content) {
-      // 如果完全没有内容，才显示错误
-      assistantMsg.content = `**错误：** ${escapeHtml(err.message)}`;
-      assistantMsg.isError = true;
-    }
-    save();
-    renderMessages();
-    setStatus('err');
-  } finally {
-    state.loading = false;
-    state.abortController = null;
-    updateSendButton();
-    toggleSendStop();
-    renderMessages();
-    scrollToBottom();
-  }
-}
 
 // ===== Continue Generation =====
-async function continueGeneration(msgId) {
-  const conv = currentConv();
-  if (!conv || state.loading) return;
 
-  const msg = getMsg(conv, msgId);
-  if (!msg || !msg.interrupted) return;
-
-  // Clear interrupted state
-  msg.interrupted = false;
-  msg.errorMsg = '';
-  save();
-  renderMessages();
-
-  // Build context: system prompt + history up to this message
-  const context = buildContextForContinue(conv, msg);
-  await sendFromMessageContinue(context, msg);
-}
-
-function buildContextForContinue(conv, targetMsg) {
-  const msgs = [];
-
-  // System prompt
-  const sysParts = [];
-  if (conv.systemPrompt) sysParts.push(conv.systemPrompt);
-  // Emphasis prompt (after system prompt, before status bar)
-  if (conv.emphasis) sysParts.push('【重要强调】' + conv.emphasis);
-  // Status bar instruction (before user identity)
-  if (conv.statusBar && conv.statusBar.enabled) {
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    var sbExample = sbTemplate.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
-    sysParts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + sbTemplate + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>【角色状态】\\n' + sbExample + '\\n</status>');
-  }
-  if (conv.userIdentity) sysParts.push('用户身份：' + conv.userIdentity);
-  if (sysParts.length > 0) msgs.push({ role: 'system', content: sysParts.join('\\n\\n') });
-
-  // Walk up from targetMsg to root, collect messages
-  const chain = [];
-  let current = targetMsg;
-  while (current && current.parentId) {
-    chain.unshift(current);
-    current = conv.messageMap[current.parentId];
-  }
-
-  for (const m of chain) {
-    if (!m || m.role === 'system') continue;
-    let content = m.content;
-    content = buildFileContent(m);
-    msgs.push({ role: m.role, content });
-
-    // Mid-context injection: remind every 4 messages
-    if (conv.statusBar && conv.statusBar.enabled && msgs.length % 4 === 0) {
-      var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容包括：' + sbTemplate });
-    }
-  }
-
-  // Post-History Instruction: status bar reminder right before generation
-  if (conv.statusBar && conv.statusBar.enabled) {
-    var sbTemplate = conv.statusBar.template || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容包括：' + sbTemplate + '。这是强制格式要求，不可省略。' });
-    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容包括：' + sbTemplate + '。这是强制要求，不可省略。' });
-  }
-
-  return msgs;
-}
-
-async function sendFromMessageContinue(context, assistantMsg) {
-  const conv = currentConv();
-  if (!conv) return;
-
-  state.loading = true;
-  state.abortController = new AbortController();
-  updateSendButton();
-  toggleSendStop();
-  setStatus('busy');
-
-  // Save existing content for continuation
-  const existingContent = assistantMsg.content || '';
-  const existingReasoning = assistantMsg.reasoningContent || '';
-
-  renderMessages();
-  const lastMsgEl = messagesEl.querySelector(`.message[data-id="${assistantMsg.id}"] .msg-bubble`);
-  if (lastMsgEl) lastMsgEl.classList.add('cursor-blink');
-
-  try {
-    var provider = getProvider(conv.providerId);
-    if (!provider) {
-      assistantMsg.content = existingContent + '\n\n**错误：** 请先在设置中添加接口';
-      save(); renderMessages(); state.loading = false;
-      toggleSendStop(); scrollToBottom(); return;
-    }
-    var isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.') || window.location.hostname.startsWith('172.') || window.location.hostname.startsWith('10.') || window.location.hostname.endsWith('.local');
-    var useDirect = settings.directMode || !isLocal;
-
-    var reqBody = {
-      messages: context,
-      model: conv.model,
-      stream: true,
-      thinkingEnabled: conv.thinkingEnabled !== false
-    };
-
-    var req;
-    if (useDirect) {
-      req = buildUpstreamPayload(provider, reqBody);
-    } else {
-      req = {
-        url: '/api/chat/completions',
-        headers: { 'Content-Type': 'application/json' },
-        payload: Object.assign({}, reqBody, { provider: provider })
-      };
-    }
-
-    const resp = await fetch(req.url, {
-      method: 'POST',
-      headers: req.headers,
-      body: JSON.stringify(req.payload),
-      signal: state.abortController?.signal
-    });
-
-    if (!resp.ok) {
-      const err = await resp.json();
-      throw new Error(err.detail || err.error || `HTTP ${resp.status}`);
-    }
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let fullContent = existingContent;
-    let fullReasoning = existingReasoning;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
-        try {
-          const json = JSON.parse(data);
-          const delta = json.choices?.[0]?.delta;
-          if (delta) {
-            var reasoningText2 = delta.reasoning_content || delta.thinking || delta.chain_of_thought || '';
-            if (reasoningText2) {
-              fullReasoning += reasoningText2;
-              assistantMsg.reasoningContent = fullReasoning;
-            }
-            if (delta.content) {
-              fullContent += delta.content;
-              assistantMsg.content = fullContent;
-            }
-            updateMessageContent(assistantMsg.id, fullContent, fullReasoning);
-          }
-        } catch(e) {}
-      }
-    }
-
-    assistantMsg.versions[0] = { content: fullContent, timestamp: Date.now(), reason: 'continued' };
-    save();
-    setStatus('ok');
-
-  } catch (err) {
-    console.error('Continue error:', err);
-    assistantMsg.interrupted = true;
-    assistantMsg.errorMsg = err.name === 'AbortError' ? '用户打断' : err.message;
-    save();
-    renderMessages();
-    setStatus('err');
-  } finally {
-    state.loading = false;
-    state.abortController = null;
-    updateSendButton();
-    toggleSendStop();
-    renderMessages();
-    scrollToBottom();
-  }
-}
-
-function updateMessageContent(msgId, content, reasoning) {
-  const el = messagesEl.querySelector(`.message[data-id="${msgId}"] .msg-bubble`);
-  if (!el) return;
-
-  // Reasoning block (collapsible, at top)
-  let reasoningEl = el.querySelector('.reasoning-block');
-  if (reasoning) {
-    if (!reasoningEl) {
-      reasoningEl = document.createElement('div');
-      reasoningEl.className = 'reasoning-block';
-      reasoningEl.innerHTML = `<details class="reasoning-details">
-        <summary class="reasoning-summary">思考过程</summary>
-        <div class="reasoning-content rendered-reasoning"></div>
-      </details>`;
-      el.insertBefore(reasoningEl, el.firstChild);
-    }
-    const rContent = reasoningEl.querySelector('.rendered-reasoning');
-    if (rContent) rContent.textContent = reasoning;
-  } else if (reasoningEl) {
-    reasoningEl.remove();
-  }
-
-  // Content area
-  let contentEl = el.querySelector('.rendered-content');
-  if (!contentEl) {
-    contentEl = document.createElement('div');
-    contentEl.className = 'rendered-content';
-    const actions = el.querySelector('.msg-actions');
-    if (actions) {
-      el.insertBefore(contentEl, actions);
-    } else {
-      el.appendChild(contentEl);
-    }
-  }
-  contentEl.innerHTML = marked.parse(content || '', { breaks: true, gfm: true });
-
-  // Highlight code blocks
-  contentEl.querySelectorAll('pre code').forEach(block => {
-    if (typeof hljs !== 'undefined') {
-      hljs.highlightElement(block);
-    }
-  });
-
-  scrollToBottom();
-}
 
 // ===== Branch drawer =====
-function openBranchDrawer() {
-  const conv = currentConv();
-  if (!conv) return;
-  updateZoomInput();
-  const drawer = document.getElementById('branch-drawer');
-  const tree = document.getElementById('branch-tree');
-  const info = document.getElementById('branch-info');
-  drawer.style.display = 'flex';
-
-  const totalWords = computeBranchWords(conv, conv.rootId);
-  const chainLen = getActiveChain(conv).filter(m => m && m.role !== 'system').length;
-  info.textContent = `分支总览 — ${chainLen} 条消息 · ${totalWords} 字`;
-
-  tree.innerHTML = renderTreeSVG(conv);
-  applyBranchZoom();
-  initPinchZoom();
-  bindTreeNodeLongPress();
-}
 
 let branchZoom = 1;
 
-function closeBranchDrawer() {
-  document.getElementById('branch-drawer').style.display = 'none';
-  removePinchListeners();
-  branchSearchResults = [];
-  branchSearchIdx = -1;
-  document.getElementById('branch-search-input').value = '';
-  document.getElementById('branch-search-info').textContent = '';
-}
-
-// ===== Branch search =====
-let branchSearchResults = [];
-let branchSearchIdx = -1;
-
-function doBranchSearch() {
-  const input = document.getElementById('branch-search-input');
-  const query = (input?.value || '').trim().toLowerCase();
-  const info = document.getElementById('branch-search-info');
-  const conv = currentConv();
-  if (!query || !conv) {
-    branchSearchResults = []; branchSearchIdx = -1;
-    clearSearchHighlights();
-    if (info) info.textContent = '';
-    return;
-  }
-  // Search all messages in the conversation
-  branchSearchResults = [];
-  for (const [id, msg] of Object.entries(conv.messageMap || {})) {
-    if (msg.role === 'system') continue;
-    const content = (msg.content || '').toLowerCase();
-    const title = (msg.title || '').toLowerCase();
-    const idx = content.indexOf(query);
-    if (idx >= 0) {
-      branchSearchResults.push({ id, pos: idx, text: content.substring(Math.max(0,idx-20), idx+query.length+40) });
-    }
-  }
-  branchSearchIdx = branchSearchResults.length > 0 ? 0 : -1;
-  if (info) info.textContent = branchSearchResults.length > 0 
-    ? `${branchSearchResults.length} 条` : '无结果';
-  updateSearchHighlights();
-  renderSearchResults();
-  if (branchSearchIdx >= 0) navigateToSearchResult(0);
-}
-
-function renderSearchResults() {
-  const container = document.getElementById('branch-search-results');
-  if (!container) return;
-  if (branchSearchResults.length === 0) {
-    container.style.display = 'none';
-    container.innerHTML = '';
-    return;
-  }
-  container.style.display = 'block';
-  const query = (document.getElementById('branch-search-input')?.value || '').trim();
-  container.innerHTML = branchSearchResults.map((r, i) => {
-    const conv = currentConv();
-    const msg = conv?.messageMap?.[r.id];
-    const role = msg?.role === 'user' ? ICON.user : ICON.bot;
-    const text = escapeHtml(r.text);
-    const hl = text.replace(new RegExp(escapeRegex(query), 'gi'), m => `<mark class="result-highlight">${m}</mark>`);
-    return `<div class="branch-search-result" data-idx="${i}" onclick="jumpToSearchResult(${i})">
-      <span class="result-role">${role}</span>
-      <span class="result-text">${hl}</span>
-    </div>`;
-  }).join('');
-}
-
-function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-
-window.jumpToSearchResult = function(idx) {
-  branchSearchIdx = idx;
-  navigateToSearchResult(0);
-};
-
-function updateSearchHighlights() {
-  const svg = document.querySelector('.branch-svg');
-  if (!svg) return;
-  // Clear old highlights
-  svg.querySelectorAll('.search-highlight').forEach(el => el.remove());
-  // Add new highlights
-  const resultIds = new Set(branchSearchResults.map(r => r.id));
-  svg.querySelectorAll('.tree-node').forEach(g => {
-    const onclick = g.getAttribute('onclick') || '';
-    const idMatch = onclick.match(/'([^']+)'/);
-    if (idMatch && resultIds.has(idMatch[1])) {
-      const rect = g.querySelector('rect');
-      if (rect) {
-        const hl = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        hl.setAttribute('x', rect.getAttribute('x'));
-        hl.setAttribute('y', rect.getAttribute('y'));
-        hl.setAttribute('width', rect.getAttribute('width'));
-        hl.setAttribute('height', rect.getAttribute('height'));
-        hl.setAttribute('rx', '8');
-        hl.setAttribute('fill', 'none');
-        hl.setAttribute('stroke', '#f59e0b');
-        hl.setAttribute('stroke-width', '3');
-        hl.classList.add('search-highlight');
-        g.appendChild(hl);
-      }
-    }
-  });
-}
-
-function clearSearchHighlights() {
-  document.querySelectorAll('.search-highlight').forEach(el => el.remove());
-}
-
-function navigateToSearchResult(dir) {
-  if (branchSearchResults.length === 0) return;
-  branchSearchIdx = (branchSearchIdx + dir + branchSearchResults.length) % branchSearchResults.length;
-  const result = branchSearchResults[branchSearchIdx];
-  const info = document.getElementById('branch-search-info');
-  if (info) info.textContent = `${branchSearchIdx + 1}/${branchSearchResults.length}`;
-  // Find and scroll to the node in SVG
-  const container = document.querySelector('.branch-drawer-body');
-  const svg = document.querySelector('.branch-svg');
-  if (!container || !svg) return;
-  const nodes = svg.querySelectorAll('.tree-node');
-  for (const g of nodes) {
-    const onclick = g.getAttribute('onclick') || '';
-    if (onclick.includes(result.id)) {
-      // Scroll the container to make this node visible
-      const transform = g.getAttribute('transform') || '';
-      const match = transform.match(/translate\(([^,]+),\s*([^)]+)\)/);
-      if (match) {
-        const tx = parseFloat(match[1]), ty = parseFloat(match[2]);
-        container.scrollTop = Math.max(0, ty * branchZoom - container.clientHeight / 2);
-        container.scrollLeft = Math.max(0, tx * branchZoom - container.clientWidth / 2);
-      }
-      // Flash highlight
-      g.style.outline = '3px solid #f59e0b';
-      g.style.outlineOffset = '2px';
-      g.style.zIndex = '10';
-      setTimeout(() => { g.style.outline = ''; g.style.outlineOffset = ''; g.style.zIndex = ''; }, 1500);
-      break;
-    }
-  }
-}
 
 // Pinch-zoom for mobile
 let pinchState = null;
@@ -2736,156 +1176,7 @@ function onPinchEnd() {
 }
 
 // ===== SVG Tree Layout & Rendering =====
-function renderTreeSVG(conv) {
-  const NODE_W = 150, NODE_H = 50;
-  const H_GAP = 24, V_GAP = 32;
-  
-  // Step 1: collect non-system nodes into levels, compute subtree widths
-  const levels = {}; // depth -> [{id, msg, subtreeW}]
-  const parentOf = {}; // childId -> parentId
-  
-  function measure(nodeId, depth) {
-    const msg = conv.messageMap[nodeId];
-    if (!msg) return 0;
-    const isHidden = msg.role === 'system' && msg.parentId !== null;
-    const children = msg.children || [];
-    let childW = 0;
-    for (const cid of children) {
-      parentOf[cid] = nodeId;
-      const w = measure(cid, isHidden ? depth : depth + 1);
-      childW += w + (w > 0 ? H_GAP : 0);
-    }
-    childW = Math.max(0, childW - H_GAP);
-    if (!isHidden) {
-      if (!levels[depth]) levels[depth] = [];
-      levels[depth].push({ id: nodeId, msg, subtreeW: Math.max(childW, NODE_W) });
-    }
-    return Math.max(childW, NODE_W);
-  }
-  
-  measure(conv.rootId, 0);
-  
-  const maxDepth = Math.max(...Object.keys(levels).map(Number), 0);
-  if (maxDepth === 0) return '<div style="padding:20px;color:var(--text2)">暂无分支</div>';
-  
-  // Step 2: assign x,y positions
-  const positions = {};
-  for (let d = 0; d <= maxDepth; d++) {
-    const nodes = levels[d] || [];
-    if (nodes.length === 0) continue;
-    // Spread nodes evenly, using subtree widths
-    const totalW = nodes.reduce((sum, n) => sum + n.subtreeW, 0) + (nodes.length - 1) * H_GAP;
-    let x = 0;
-    for (const node of nodes) {
-      positions[node.id] = {
-        x: x + node.subtreeW / 2,
-        y: d * (NODE_H + V_GAP) + NODE_H / 2
-      };
-      x += node.subtreeW + H_GAP;
-    }
-  }
-  
-  // Step 3: build SVG
-  const svgW = Math.max(
-    Object.values(positions).reduce((max, p) => Math.max(max, p.x + NODE_W/2 + 20), 0),
-    300
-  );
-  const svgH = (maxDepth + 1) * (NODE_H + V_GAP) + 20;
-  
-  let svg = `<svg class="branch-svg" viewBox="0 0 ${svgW} ${svgH}" width="${svgW}" height="${svgH}">`;
-  svg += `<defs><filter id="shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.1"/></filter></defs>`;
-  
-  // Draw edges
-  for (const [childId, parentId] of Object.entries(parentOf)) {
-    const pp = positions[parentId];
-    const cp = positions[childId];
-    if (!pp || !cp) continue;
-    const pMsg = conv.messageMap[parentId];
-    if (pMsg && pMsg.role === 'system' && !pMsg.parentId) continue; // skip root edges
-    const isActiveEdge = conv.activePath.includes(parentId) && conv.activePath.includes(childId);
-    svg += `<line x1="${pp.x}" y1="${pp.y + NODE_H/2}" x2="${cp.x}" y2="${cp.y - NODE_H/2}" 
-      stroke="${isActiveEdge ? 'var(--primary)' : 'var(--text2)'}" stroke-width="${isActiveEdge ? 2 : 1}" opacity="${isActiveEdge ? 0.8 : 0.3}"/>`;
-  }
-  
-  // Draw nodes
-  for (const [nodeId, pos] of Object.entries(positions)) {
-    const msg = conv.messageMap[nodeId];
-    if (!msg) continue;
-    const isActive = conv.activePath.includes(nodeId);
-    const hasChildren = (msg.children || []).length > 0;
-    const iconChar = msg.role === 'user' ? 'U' : 'A';
-    const rawTitle = (msg.title || msg.content || '');
-    const cleanTitle = (typeof rawTitle === 'string' ? rawTitle : '').replace(/\s+/g, ' ').trim() || '(空)';
-    // Truncate by visual width: CJK ≈ 2 units, ASCII ≈ 1 unit
-    let title = '', w = 0, maxW = 16;
-    for (const ch of cleanTitle) { 
-      const cw = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? 2 : 1;
-      if (w + cw > maxW) { title += '…'; break; }
-      title += ch; w += cw;
-    }
-    const wc = msg.wordCount || countWords(msg.content || '');
-    
-    const bx = pos.x - NODE_W/2;
-    const by = pos.y - NODE_H/2;
-    const fillColor = msg.color || (isActive ? 'var(--primary)' : 'var(--bg2)');
-    
-    svg += `<g class="tree-node" onclick="svgNodeClick('${nodeId}')" oncontextmenu="event.preventDefault();svgNodeMenu(event,'${nodeId}')" data-node-id="${nodeId}" transform="translate(${bx},${by})">
-      <rect x="0" y="0" width="${NODE_W}" height="${NODE_H}" rx="8" 
-        fill="${fillColor}" 
-        stroke="${isActive ? 'var(--primary)' : 'var(--border)'}" 
-        stroke-width="${isActive ? 1.5 : 1}" filter="url(#shadow)"/>
-      <circle cx="12" cy="14" r="5" fill="${msg.role === 'user' ? '#3b82f6' : '#10b981'}" opacity="${isActive ? 0.9 : 0.6}"/>
-      <text x="12" y="17" font-size="8" font-weight="bold" fill="#fff" text-anchor="middle" font-family="inherit">${iconChar}</text>
-      <text x="24" y="18" font-size="11" font-weight="${isActive ? 'bold' : 'normal'}" 
-        fill="${isActive ? '#fff' : 'var(--text)'}" font-family="inherit">${escapeSvg(title)}</text>
-      <text x="24" y="36" font-size="10" fill="${isActive ? 'rgba(255,255,255,0.7)' : 'var(--text2)'}" font-family="inherit">${wc}字${hasChildren ? ' ▾' : ''}</text>
-    </g>`;
-  }
-  
-  svg += '</svg>';
-  return svg;
-}
 
-function escapeSvg(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-window.svgNodeClick = function(nodeId) {
-  const conv = currentConv();
-  if (!conv) return;
-  const newPath = getBranchPath(conv, nodeId);
-  conv.activePath = newPath;
-  save();
-  renderMessages();
-  renderBreadcrumb(conv);
-  closeBranchDrawer();
-};
-
-function applyBranchZoom() {
-  const svg = document.querySelector('.branch-svg');
-  if (!svg) return;
-  const origW = parseInt(svg.getAttribute('data-orig-w') || svg.getAttribute('width'));
-  const origH = parseInt(svg.getAttribute('data-orig-h') || svg.getAttribute('height'));
-  if (!svg.hasAttribute('data-orig-w')) {
-    svg.setAttribute('data-orig-w', origW);
-    svg.setAttribute('data-orig-h', origH);
-  }
-  svg.setAttribute('width', Math.round(origW * branchZoom));
-  svg.setAttribute('height', Math.round(origH * branchZoom));
-}
-function applyBranchCenter() {
-  const container = document.querySelector('.branch-drawer-body');
-  const svg = document.querySelector('.branch-svg');
-  if (!container || !svg) return;
-  const rootNode = svg.querySelector('.tree-node');
-  if (!rootNode) return;
-  const transformAttr = rootNode.getAttribute('transform') || '';
-  const match = transformAttr.match(/translate\(([^,]+),\s*([^)]+)\)/);
-  const tx = parseFloat(match?.[1]) || 0;
-  const ty = parseFloat(match?.[2]) || 0;
-  container.scrollLeft = Math.max(0, (tx + 90) * branchZoom - container.clientWidth / 2);
-  container.scrollTop = Math.max(0, (ty + 22) * branchZoom - container.clientHeight / 2);
-}
 
 function updateZoomInput() {
   const inp = document.getElementById('zoom-input');
@@ -2930,120 +1221,9 @@ window.svgNodeRename = function(nodeId) {
 };
 
 // ===== Branch tree node context menu =====
-window.svgNodeMenu = function(event, nodeId) {
-  showTreeNodeMenu(event, nodeId);
-};
 
-function showTreeNodeMenu(event, nodeId) {
-  const conv = currentConv();
-  if (!conv) return;
-  const msg = getMsg(conv, nodeId);
-  if (!msg) return;
-
-  // Remove any existing menu
-  closeTreeNodeMenu();
-
-  const isRoot = !msg.parentId;
-  const menu = document.createElement('div');
-  menu.id = 'tree-node-menu';
-  menu.className = 'tree-node-menu';
-
-  // Rename option
-  const renameBtn = document.createElement('div');
-  renameBtn.className = 'tree-menu-item';
-  renameBtn.innerHTML = ICON.edit + ' 改名';
-  renameBtn.addEventListener('click', function() {
-    closeTreeNodeMenu();
-    const newName = prompt('输入新名称:', msg.title || '');
-    if (newName !== null && newName.trim()) {
-      msg.title = newName.trim();
-      save();
-      openBranchDrawer();
-      renderMessages();
-    }
-  });
-  menu.appendChild(renameBtn);
-
-  // Color option
-  const colorBtn = document.createElement('div');
-  colorBtn.className = 'tree-menu-item';
-  colorBtn.innerHTML = ICON.palette + ' 选色';
-  colorBtn.addEventListener('click', function() {
-    closeTreeNodeMenu();
-    const colorList = NODE_COLORS.map((c,i) => `${i}. ${c.name}`).join('\n');
-    const curIdx = msg.color ? NODE_COLORS.findIndex(c => c.value === msg.color) : 0;
-    const idx = prompt('选择颜色:\n' + colorList + '\n输入数字:', curIdx.toString());
-    if (idx !== null) {
-      const ci = parseInt(idx) || 0;
-      if (ci >= 0 && ci < NODE_COLORS.length) {
-        msg.color = NODE_COLORS[ci].value;
-        save();
-        openBranchDrawer();
-      }
-    }
-  });
-  menu.appendChild(colorBtn);
-
-  // Delete option (not for root)
-  if (!isRoot) {
-    const delBtn = document.createElement('div');
-    delBtn.className = 'tree-menu-item tree-menu-danger';
-    delBtn.innerHTML = ICON.trash + ' 删除';
-    delBtn.addEventListener('click', function() {
-      closeTreeNodeMenu();
-      if (confirm('确定删除这条消息及其所有分支吗？')) {
-        deleteMessage(nodeId);
-        openBranchDrawer();
-      }
-    });
-    menu.appendChild(delBtn);
-  } else {
-    const rootHint = document.createElement('div');
-    rootHint.className = 'tree-menu-item tree-menu-disabled';
-    rootHint.innerHTML = ICON.ban + ' 根节点不可删除';
-    menu.appendChild(rootHint);
-  }
-
-  // Position menu at click point
-  let x, y;
-  if (event.touches && event.touches.length > 0) {
-    x = event.touches[0].clientX;
-    y = event.touches[0].clientY;
-  } else if (event.changedTouches && event.changedTouches.length > 0) {
-    x = event.changedTouches[0].clientX;
-    y = event.changedTouches[0].clientY;
-  } else {
-    x = event.clientX;
-    y = event.clientY;
-  }
-  menu.style.left = x + 'px';
-  menu.style.top = y + 'px';
-  document.body.appendChild(menu);
-
-  // Close on click outside
-  setTimeout(function() {
-    document.addEventListener('click', closeTreeNodeMenu, { once: true });
-  }, 50);
-}
-
-function closeTreeNodeMenu() {
-  const existing = document.getElementById('tree-node-menu');
-  if (existing) existing.remove();
-}
 
 // Bind long-press on tree nodes after render
-function bindTreeNodeLongPress() {
-  const nodes = document.querySelectorAll('.branch-svg .tree-node');
-  nodes.forEach(function(g) {
-    const nodeId = g.getAttribute('data-node-id');
-    if (!nodeId) return;
-    addLongPress(g, function(e) {
-      // Simulate event for positioning
-      const fakeEvent = { clientX: g.getBoundingClientRect().left + 40, clientY: g.getBoundingClientRect().top + 20 };
-      showTreeNodeMenu(fakeEvent, nodeId);
-    });
-  });
-}
 
 window.svgNodeColor = function(nodeId) {
   const conv = currentConv();
@@ -3143,35 +1323,101 @@ function applyDisplaySettings() {
   document.documentElement.style.setProperty('--lh', settings.lineSpacing);
 }
 
+// B1: 根据 tab 回填表单（conv tab 时 conv 字段优先，回退 global；global tab 时只读 global）
+function fillSettingsForm() {
+  var conv = currentConv();
+  // 会话级字段（直接从 conv 读取，无全局继承）
+  thinkingToggle.checked = conv ? (conv.thinkingEnabled !== false) : true;
+  systemPromptInput.value = (conv && conv.systemPrompt) || '';
+  $('emphasis-prompt').value = (conv && conv.emphasis) || '';
+  userIdentityInput.value = (conv && conv.userIdentity) || '';
+  var sb = effectiveStatusBar(conv);
+  $('statusbar-toggle').checked = sb.enabled;
+  var ruleEl = document.getElementById('statusbar-template-rule');
+  var dfEl = document.getElementById('statusbar-display-fields');
+  if (ruleEl) ruleEl.value = sb.templateRule || '';
+  if (dfEl) dfEl.value = sb.displayFields || '';
+  $('statusbar-position').value = sb.position || 'bottom';
+  var showRows = sb.enabled ? '' : 'none';
+  $('statusbar-template-row').style.display = showRows;
+  var dfRow = document.getElementById('statusbar-display-fields-row');
+  if (dfRow) dfRow.style.display = showRows;
+  $('statusbar-template-hint').style.display = showRows;
+  $('statusbar-position-row').style.display = showRows;
+  // 全局偏好字段
+  var dmCheck = document.getElementById('direct-mode-check');
+  if (dmCheck) dmCheck.checked = settings.directMode || false;
+  var smSelect = document.getElementById('native-streaming-mode-select');
+  if (smSelect) smSelect.value = settings.nativeStreamingMode || 'auto';
+  var hfCheck = document.getElementById('haptic-feedback-check');
+  if (hfCheck) hfCheck.checked = settings.hapticFeedback !== false;
+  var fsSelect = document.getElementById('font-size-select');
+  var lsSelect = document.getElementById('line-spacing-select');
+  if (fsSelect) fsSelect.value = settings.fontSize || '15';
+  if (lsSelect) lsSelect.value = settings.lineSpacing || '1.6';
+  // B2: 模型修饰
+  var mpKey = conv ? ((conv.providerId || '') + ':' + (conv.model || '')) : '';
+  var mpLabel = document.getElementById('model-prompts-key-label');
+  if (mpLabel) mpLabel.textContent = mpKey || '(无当前会话)';
+  var mp = (conv && settings.modelPrompts && settings.modelPrompts[mpKey]) || {};
+  var mpTextEl = document.getElementById('model-prompt-text');
+  if (mpTextEl) mpTextEl.value = mp.text || '';
+  var mpDisableEl = document.getElementById('model-prompt-disable-check');
+  if (mpDisableEl) mpDisableEl.checked = !!(conv && conv.modelPromptDisabled);
+  var mpOverrideEl = document.getElementById('model-prompt-override-check');
+  var mpOverrideRow = document.getElementById('model-prompt-override-row');
+  var hasOverride = !!(conv && conv.modelPromptOverride);
+  if (mpOverrideEl) mpOverrideEl.checked = hasOverride;
+  if (mpOverrideRow) mpOverrideRow.style.display = hasOverride ? '' : 'none';
+  var mpOverrideTextEl = document.getElementById('model-prompt-override');
+  if (mpOverrideTextEl) mpOverrideTextEl.value = (conv && conv.modelPromptOverride) || '';
+  // C5: 应用分组收折记忆状态
+  applyGroupCollapseState();
+}
+
+// C5: 应用设置分组收折状态（根据 settings.groupCollapse 覆盖 HTML 默认 open）
+function applyGroupCollapseState() {
+  var gc = settings.groupCollapse || {};
+  var groups = document.querySelectorAll('#settings-body .setting-group-collapsible[data-group-key]');
+  groups.forEach(function(el) {
+    var key = el.getAttribute('data-group-key');
+    if (!key) return;
+    // 绑定 toggle 事件（仅绑一次，用 dataset 标记）
+    if (!el.dataset.collapseBound) {
+      el.dataset.collapseBound = '1';
+      el.addEventListener('toggle', function() {
+        if (!settings.groupCollapse) settings.groupCollapse = {};
+        settings.groupCollapse[key] = !el.open; // true=折叠, false=展开
+        saveSettings();
+      });
+    }
+    // 覆盖 HTML 默认 open：记忆为折叠则强制收起，记忆为展开则强制展开
+    if (gc[key] === true) el.open = false;
+    else if (gc[key] === false) el.open = true;
+  });
+}
+
 function toggleSettings(open) {
   state.settingsOpen = open;
   settingsPanel.style.display = open ? 'flex' : 'none';
   if (open) {
     renderProviderList();
-    const conv = currentConv();
-    thinkingToggle.checked = conv ? conv.thinkingEnabled : settings.thinkingEnabled;
-    systemPromptInput.value = conv?.systemPrompt || '';
-    $('emphasis-prompt').value = conv?.emphasis || '';
-    userIdentityInput.value = conv?.userIdentity || '';
-    // Display settings
-    const fsSelect = document.getElementById('font-size-select');
-    const lsSelect = document.getElementById('line-spacing-select');
-    if (fsSelect) fsSelect.value = settings.fontSize || '15';
-    if (lsSelect) lsSelect.value = settings.lineSpacing || '1.6';
-    // Status bar settings (per-conversation)
-    var sb = conv?.statusBar || { enabled: false, template: '', position: 'bottom' };
-    $('statusbar-toggle').checked = sb.enabled;
-    $('statusbar-template').value = sb.template || '';
-    $('statusbar-position').value = sb.position || 'bottom';
-    $('statusbar-template-row').style.display = sb.enabled ? '' : 'none';
-    $('statusbar-template-hint').style.display = sb.enabled ? '' : 'none';
-    $('statusbar-position-row').style.display = sb.enabled ? '' : 'none';
+    renderImageProviderList();   // F1: 生图 API provider 列表
+    updateImageGalleryCount();   // F1: 图库计数
+    fillSettingsForm();
+    // 刷新回顶/底按钮状态（等 DOM 布局完成）
+    setTimeout(function() { if (state._updateSettingsScrollBtn) state._updateSettingsScrollBtn(); }, 0);
   }
 }
 
 function saveSettingsHandler() {
+  // 全局偏好
   settings.thinkingEnabled = thinkingToggle.checked;
-  // Display settings
+  settings.directMode = document.getElementById('direct-mode-check')?.checked || false;
+  const streamingModeSelect = document.getElementById('native-streaming-mode-select');
+  if (streamingModeSelect) settings.nativeStreamingMode = streamingModeSelect.value;
+  const hapticCheck = document.getElementById('haptic-feedback-check');
+  if (hapticCheck) settings.hapticFeedback = hapticCheck.checked;
   const fsSelect = document.getElementById('font-size-select');
   const lsSelect = document.getElementById('line-spacing-select');
   if (fsSelect) settings.fontSize = fsSelect.value;
@@ -3179,23 +1425,48 @@ function saveSettingsHandler() {
   applyDisplaySettings();
   saveSettings();
 
-  // Per-conversation: save prompts and status bar settings
+  // 会话级字段
   const conv = currentConv();
   if (conv) {
     conv.thinkingEnabled = thinkingToggle.checked;
-    conv.systemPrompt = systemPromptInput.value.trim();
-    conv.emphasis = $('emphasis-prompt').value.trim();
-    conv.userIdentity = userIdentityInput.value.trim();
+    conv.systemPrompt = systemPromptInput.value.trim() || null;
+    conv.emphasis = $('emphasis-prompt').value.trim() || null;
+    conv.userIdentity = userIdentityInput.value.trim() || null;
     conv.statusBar = {
       enabled: $('statusbar-toggle').checked,
-      template: $('statusbar-template').value.trim(),
+      templateRule: (document.getElementById('statusbar-template-rule') || {}).value ? (document.getElementById('statusbar-template-rule').value || '').trim() : '',
+      displayFields: (document.getElementById('statusbar-display-fields') || {}).value ? (document.getElementById('statusbar-display-fields').value || '').trim() : '',
       position: $('statusbar-position').value
     };
+    // B2: 模型修饰会话级覆盖
+    var mpDisableEl = document.getElementById('model-prompt-disable-check');
+    if (mpDisableEl) conv.modelPromptDisabled = mpDisableEl.checked;
+    var mpOverrideEl = document.getElementById('model-prompt-override-check');
+    var mpOverrideTextEl = document.getElementById('model-prompt-override');
+    if (mpOverrideEl && mpOverrideEl.checked && mpOverrideTextEl) {
+      conv.modelPromptOverride = mpOverrideTextEl.value.trim() || null;
+    } else {
+      conv.modelPromptOverride = null;
+    }
     save();
+  }
+
+  // B2: 全局模型修饰语保存
+  if (conv) {
+    var mpKey = (conv.providerId || '') + ':' + (conv.model || '');
+    var mpTextEl = document.getElementById('model-prompt-text');
+    var newText = mpTextEl ? mpTextEl.value.trim() : '';
+    if (newText) {
+      settings.modelPrompts[mpKey] = { text: newText };
+    } else {
+      delete settings.modelPrompts[mpKey];
+    }
+    saveSettings();
   }
 
   toggleSettings(false);
 }
+
 
 // ===== Version Navigation =====
 window.prevVersion = function(msgId) {
@@ -3229,21 +1500,7 @@ window.nextVersion = function(msgId) {
 };
 
 // ===== UI Helpers =====
-function toggleSendStop() {
-  var send = document.getElementById('btn-send');
-  var stop = document.getElementById('btn-stop');
-  if (send) send.style.display = state.loading ? 'none' : 'flex';
-  if (stop) stop.style.display = state.loading ? 'flex' : 'none';
-}
-function updateSendButton() {
-  const hasText = chatInput.innerText.trim().length > 0;
-  const hasFiles = state.pendingFiles?.length > 0;
-  btnSend.disabled = (!hasText && !hasFiles) || state.loading;
-}
 
-function setStatus(type) {
-  statusIndicator.className = type === 'ok' ? 'status-ok' : type === 'err' ? 'status-err' : 'status-ok';
-}
 
 function escapeHtml(str) {
   const div = document.createElement('div');
@@ -3268,404 +1525,33 @@ document.addEventListener('click', (e) => {
 
 // ===== Import / Export =====
 
-// 等待 IndexedDB 数据加载完成
-async function ensureDataLoaded() {
-  if (state._dataLoaded) return;
-  let tries = 0;
-  while (!state._dataLoaded && tries < 50) {
-    await new Promise(r => setTimeout(r, 100));
-    tries++;
-  }
-}
+// 等待 IndexedDB 数据加载完成（避免导出空数据）
 
 // 导出全部数据（对话 + Provider + 设置）
-async function exportAllData() {
-  await ensureDataLoaded();
-  const data = {
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    conversations: state.conversations,
-    providers: state.providers,
-    settings: settings,
-    currentId: state.currentId
-  };
-  const jsonText = JSON.stringify(data, null, 2);
-  const fileName = 'chat-lite-backup-' + new Date().toISOString().slice(0, 10) + '.json';
-  const blob = new Blob([jsonText], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast('已导出全部数据');
-}
+// APK 模式：用 Filesystem 写入 + Share 分享；Web 模式：用 <a download>
+// 修复（v1.3.0 批次1+）：原方案 btoa(unescape(encodeURIComponent(jsonText))) 在大数据
+//   （几十MB）时会同时持有 5 份字符串副本，峰值内存约 5x 数据量，触发 Android WebView OOM 卡退。
+//   改用 Filesystem 6.x 原生 encoding:'utf8' 直接写文本，峰值降到 2x；JSON 也用紧凑格式省 30%+。
 
 // 导入全部数据
 // mode: 'overwrite'（覆盖，默认）或 'merge'（按 ID 合并，冲突时导入数据优先）
-async function importAllData(jsonText, mode) {
-  await ensureDataLoaded();
-  mode = mode || 'overwrite';
+// 修复（v1.3.0 批次1+）：导入前自动备份原走 btoa(unescape(encodeURIComponent(...))) 路径，
+//   若用户当前数据也大，导入大文件时会在备份步骤 OOM 崩溃，反而把当前数据搞丢。
+//   改用 encoding:'utf8' 直接写文本，与 exportAllData 一致。
 
-  let data;
-  try {
-    data = JSON.parse(jsonText);
-  } catch (e) {
-    showToast('JSON 解析失败：' + e.message);
-    return;
-  }
-  if (!data.conversations && !data.providers) {
-    showToast('文件格式不正确');
-    return;
-  }
-  if (data.version && data.version > 1) {
-    showToast('备份文件版本过高，可能不兼容');
-  }
+// F1: 把 settings.images 中残留的 dataUrl 转存到 Filesystem（导入旧备份后的清理）
+// 图片迁移（migrateImportedImagesToFilesystem） 已迁移到 image-gen.js
 
-  const modeText = mode === 'merge' ? '合并' : '覆盖';
-  if (!confirm('即将以「' + modeText + '」方式导入数据。\n\n覆盖：直接替换当前所有数据\n合并：按 ID 去重，冲突时用导入数据替换本地\n\n确定继续吗？')) return;
+// 文件选择回调（用于 importAllData 的 <input type="file">）
+// 修复（v1.3.0 批次1+）：加 loading toast 提示，超大文件（>80MB）警告但不禁阻
 
-  if (mode === 'overwrite') {
-    if (data.conversations) state.conversations = data.conversations;
-    if (data.providers) state.providers = data.providers;
-    if (data.settings) {
-      Object.assign(settings, data.settings);
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-    }
-    if (data.currentId) {
-      state.currentId = data.currentId;
-    } else {
-      state.currentId = state.conversations.length > 0 ? state.conversations[0].id : null;
-    }
-  } else {
-    if (data.conversations) {
-      const importedIds = new Set(data.conversations.map(c => c.id));
-      const kept = state.conversations.filter(c => !importedIds.has(c.id));
-      state.conversations = kept.concat(data.conversations);
-    }
-    if (data.providers) {
-      const importedPIds = new Set(data.providers.map(p => p.id));
-      const keptP = (state.providers || []).filter(p => !importedPIds.has(p.id));
-      state.providers = keptP.concat(data.providers);
-    }
-    if (data.settings) {
-      Object.assign(settings, data.settings);
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-    }
-    if (!state.conversations.find(c => c.id === state.currentId)) {
-      state.currentId = state.conversations.length > 0 ? state.conversations[0].id : null;
-    }
-  }
-
-  save();
-  renderSidebar();
-  renderModelSelector();
-  if (state.currentId) renderMessages();
-  showToast('已' + modeText + '导入数据');
-}
-
-// 文件选择回调
-function importAllDataFromFile(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  const modeEl = document.getElementById('import-mode-select');
-  const mode = modeEl ? modeEl.value : 'overwrite';
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    importAllData(ev.target.result, mode);
-  };
-  reader.readAsText(file);
-  e.target.value = '';
-}
-
-function exportConversation() {
-  const conv = currentConv();
-  if (!conv) return;
-  const data = { version: 2, exportedAt: new Date().toISOString(), conversation: conv };
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `chat-lite-${conv.title || 'conversation'}-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
 
 // Tolerant JSON parse: handles truncated array exports that miss outer brackets
-function tryParseJSON(raw) {
-  try {
-    return JSON.parse(raw);
-  } catch (e) {
-    let fixed = raw.trim();
-    if (!fixed.startsWith('[')) fixed = '[' + fixed;
-    if (!fixed.endsWith(']')) {
-      fixed = fixed.replace(/,\s*$/, '');
-      fixed = fixed + ']';
-    }
-    return JSON.parse(fixed);
-  }
-}
 
-function importConversation(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    try {
-      const data = tryParseJSON(ev.target.result);
-      let conv;
-      
-      // Format 1: chat-lite export
-      if (data.version && data.conversation) {
-        conv = data.conversation;
-        if (!conv.id || !conv.messageMap) throw new Error('chat-lite format corrupted');
-      }
-      // Format 2: DZMM export
-      else if (data.chatId && data.chat && data.messages) {
-        conv = convertDZMM(data);
-      }
-      // Format 3: plain chat-lite conversation (no wrapper)
-      else if (data.id && data.messageMap) {
-        conv = data;
-      }
-      // Format 4: 豆包/类角色平台导出的会话数组（每个元素含 conversation_id + messages）
-      else if (Array.isArray(data) && data.length > 0 && data[0].conversation_id && Array.isArray(data[0].messages)) {
-        conv = convertDoubao(data[0]);
-      }
-      // Format 5: old v1 linear array
-      else if (data.messages && Array.isArray(data.messages)) {
-        conv = { messages: data.messages };
-        migrateV1toV2(conv);
-      }
-      else {
-        alert('不支持的格式，请导入 chat-lite 导出的 JSON 或 DZMM 导出的 JSON');
-        return;
-      }
-      
-      conv.id = uid();
-      state.conversations.push(conv);
-      state.currentId = conv.id;
-      save();
-      renderSidebar();
-      renderMessages();
-      // Match provider for imported conversation
-      if (!conv.providerId && conv.model) {
-        var matched = state.providers.find(function(p) { return p.models && p.models.some(function(m) { return m.id === conv.model; }); });
-        if (matched) conv.providerId = matched.id;
-        else if (state.providers.length > 0) { conv.providerId = state.providers[0].id; }
-      }
-      syncModelSelector();
-    } catch (err) {
-      alert('文件解析失败: ' + err.message);
-    }
-  };
-  reader.readAsText(file);
-  e.target.value = '';
-}
 
 // Convert DZMM (dzmm.ai) export format to chat-lite tree
-function convertDZMM(data) {
-  const chat = data.chat || {};
-  const chunks = chat.chunks || [];
-  const messages = data.messages || [];
-  
-  // Build message lookup by chunk_id
-  const chunkMsgs = {};
-  for (const entry of messages) {
-    chunkMsgs[entry.chunk_id] = entry.messages || [];
-  }
-  
-  // Build chunk map  
-  const chunkMap = {};
-  for (const c of chunks) {
-    chunkMap[c.id] = c;
-  }
-  
-  // Find root chunks
-  const roots = chunks.filter(c => !c.parent);
-  const rootId = uid();
-  const rootMsg = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
-  const messageMap = { [rootId]: rootMsg };
-  
-  // Helper to create a message node
-  function createMsgNode(role, content, parentId) {
-    const text = String(content || '');
-    const node = {
-      id: uid(), role, content: text,
-      parentId, children: [],
-      title: (role === 'user' ? (text.substring(0, 30) + (text.length > 30 ? '...' : '')) : '回复').replace(/\n/g, ' '),
-      wordCount: countWords(text),
-      versions: [{ content: text, timestamp: Date.now(), reason: 'import' }],
-      activeVersion: 0, files: [], createdAt: Date.now()
-    };
-    messageMap[node.id] = node;
-    messageMap[parentId].children.push(node.id);
-    return node.id;
-  }
-  
-  // Cache: chunkId → [nodeIds] so we can trace active path
-  const chunkNodeIds = {};
-  // Cache: chunkId → lastNodeId for child chunk attachment
-  const chunkLastNode = {};
-  
-  // Walk the tree: create individual nodes per message, NOT merged
-  function walk(chunkId, parentId) {
-    const chunk = chunkMap[chunkId];
-    if (!chunk) return parentId;
-    
-    // If already walked, just re-attach first node
-    if (chunkLastNode[chunkId] !== undefined) {
-      const lastId = chunkLastNode[chunkId];
-      const nids = chunkNodeIds[chunkId] || [];
-      if (nids.length > 0 && messageMap[nids[0]] && !messageMap[parentId].children.includes(nids[0])) {
-        messageMap[nids[0]].parentId = parentId;
-        messageMap[parentId].children.push(nids[0]);
-      }
-      return lastId;
-    }
-    
-    const msgs = chunkMsgs[chunkId] || [];
-    let lastId = parentId;
-    
-    // Create individual nodes for each message (NO merging)
-    const nodeIds = [];
-    for (const m of msgs) {
-      const ct = (typeof m.content === 'string' ? m.content : String(m.content || ''));
-      if (!ct) continue;
-      lastId = createMsgNode(m.role || 'user', ct, lastId);
-      nodeIds.push(lastId);
-    }
-    
-    chunkNodeIds[chunkId] = nodeIds;
-    chunkLastNode[chunkId] = lastId;
-    
-    // Walk children — they attach to lastId
-    const children = (chunk.children || []).filter(c => chunkMap[c]);
-    for (const childId of children) {
-      walk(childId, lastId);
-    }
-    
-    return lastId;
-  }
-  
-  // Walk all chunks from each root
-  for (const r of roots) {
-    walk(r.id, rootId);
-  }
-  
-  // Build activePath: follow chunk.active chain, use chunkNodeIds cache directly
-  const convActivePath = [rootId];
-  function followActive(chunkId) {
-    const chunk = chunkMap[chunkId];
-    if (!chunk) return;
-    
-    // Push all nodes from this chunk
-    const nodeIds = chunkNodeIds[chunkId] || [];
-    for (const nid of nodeIds) {
-      convActivePath.push(nid);
-    }
-    
-    // Find active child chunk and recurse
-    const children = (chunk.children || []).filter(c => chunkMap[c]);
-    const activeChild = children.find(c => chunkMap[c]?.active);
-    if (activeChild) {
-      followActive(activeChild);
-    }
-  }
-  
-  for (const r of roots) {
-    if (chunkMap[r]?.active) {
-      followActive(r.id);
-      break;
-    }
-  }
-  
-  // If activePath failed, fallback to first-child chain
-  if (convActivePath.length <= 1) {
-    let cur = rootId;
-    while (true) {
-      const node = messageMap[cur];
-      if (!node || !node.children || node.children.length === 0) break;
-      cur = node.children[0];
-      convActivePath.push(cur);
-    }
-  }
-
-function getBranchPathFromMap(map, rootId, leafId) {
-  const path = [];
-  let cur = leafId;
-  while (cur && cur !== rootId) {
-    path.unshift(cur);
-    const node = map[cur];
-    if (!node || !node.parentId) break;
-    cur = node.parentId;
-  }
-  path.unshift(rootId);
-  return path;
-}
-
-  return {
-    id: uid(),
-    title: chat.title || '导入的对话',
-    model: 'deepseek-v4-flash',
-    thinkingEnabled: true,
-    systemPrompt: '',
-    userIdentity: '',
-    rootId,
-    activePath: convActivePath,
-    messageMap,
-    createdAt: Date.now()
-  };
-}
 
 // Convert 豆包/类角色平台 export format to chat-lite tree
-function convertDoubao(convData) {
-  const messages = convData.messages || [];
-  const rootId = uid();
-  const rootMsg = { id: rootId, role: 'system', content: '', parentId: null, children: [], title: '根节点', wordCount: 0, versions: [], activeVersion: 0, files: [], createdAt: Date.now() };
-  const messageMap = { [rootId]: rootMsg };
-  const activePath = [rootId];
-  let parentId = rootId;
-
-  function createMsgNode(role, content) {
-    const text = String(content || '');
-    const node = {
-      id: uid(), role, content: text,
-      parentId,
-      children: [],
-      title: (role === 'user' ? (text.substring(0, 30) + (text.length > 30 ? '...' : '')) : '回复').replace(/\n/g, ' '),
-      wordCount: countWords(text),
-      versions: [{ content: text, timestamp: Date.now(), reason: 'import' }],
-      activeVersion: 0, files: [], createdAt: Date.now()
-    };
-    messageMap[node.id] = node;
-    messageMap[parentId].children.push(node.id);
-    parentId = node.id;
-    activePath.push(node.id);
-    return node.id;
-  }
-
-  for (const m of messages) {
-    if (m.content_type !== 'text') continue;
-    const text = String(m.show_content || '');
-    if (!text) continue;
-    const role = m.user_type === 'user' ? 'user' : 'assistant';
-    createMsgNode(role, text);
-  }
-
-  return {
-    id: uid(),
-    title: convData.conversation_name || convData.bot_name || '导入的对话',
-    model: '',
-    thinkingEnabled: true,
-    systemPrompt: '',
-    userIdentity: '',
-    rootId,
-    activePath,
-    messageMap,
-    createdAt: Date.now()
-  };
-}
 
 // ===== Debug: expose state for CDP inspection =====
 window.__chatState = state;
@@ -3721,159 +1607,10 @@ function buildTreeDebug(conv) {
 // ===== PNG Character Card utilities =====
 
 // Parse a PNG file ArrayBuffer and extract character card JSON
-function parseCharacterCard(buffer) {
-  const bytes = new Uint8Array(buffer);
-  // PNG signature check
-  const sig = [137,80,78,71,13,10,26,10];
-  for (let i = 0; i < 8; i++) if (bytes[i] !== sig[i]) throw new Error('Not a valid PNG file');
-  
-  let offset = 8;
-  let charaJSON = null, ccv3JSON = null;
-  
-  while (offset < bytes.length) {
-    const length = (bytes[offset] << 24) | (bytes[offset+1] << 16) | (bytes[offset+2] << 8) | bytes[offset+3];
-    const type = String.fromCharCode(bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7]);
-    const dataStart = offset + 8;
-    
-    if (type === 'tEXt') {
-      const textBytes = bytes.slice(dataStart, dataStart + length);
-      let nullIdx = -1;
-      for (let i = 0; i < textBytes.length; i++) { if (textBytes[i] === 0) { nullIdx = i; break; } }
-      if (nullIdx >= 0) {
-        // Try UTF-8 first, fallback to Latin-1 (PNG spec default for tEXt)
-        let keyword, value;
-        try {
-          const td8 = new TextDecoder('utf-8', {fatal:true});
-          keyword = td8.decode(textBytes.slice(0, nullIdx));
-          value = td8.decode(textBytes.slice(nullIdx + 1));
-        } catch(e) {
-          const td1 = new TextDecoder('latin1');
-          keyword = td1.decode(textBytes.slice(0, nullIdx));
-          value = td1.decode(textBytes.slice(nullIdx + 1));
-        }
-        function decodeB64(b64) {
-          try {
-            // atob gives bytes as 0-255 codepoints; convert via TextDecoder
-            const raw = atob(b64);
-            const buf = new Uint8Array(raw.length);
-            for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
-            return new TextDecoder('utf-8').decode(buf);
-          } catch(e) { return null; }
-        }
-        function tryDecode(val) {
-          try { return JSON.parse(val); } catch(e) {}
-          var dec = decodeB64(val);
-          if (dec) { try { return JSON.parse(dec); } catch(e) {} }
-          return null;
-        }
-        if (keyword === 'chara') {
-          charaJSON = tryDecode(value);
-        } else if (keyword === 'ccv3') {
-          ccv3JSON = tryDecode(value);
-        }
-      }
-    }
-    
-    offset = dataStart + length + 4; // skip CRC
-  }
-  
-  const result = ccv3JSON || charaJSON;
-  // Prefer data field for V2/V3 cards
-  if (result && result.data) {
-    return result.data;
-  }
-  return result;
-}
 
 // Generate a PNG character card from fields + avatar image buffer
-function generateCharacterCard(fields, avatarBuffer) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = function(e) {
-      try {
-        const srcBytes = new Uint8Array(e.target.result);
-        // Validate PNG
-        const sig = [137,80,78,71,13,10,26,10];
-        for (let i = 0; i < 8; i++) if (srcBytes[i] !== sig[i]) throw new Error('Avatar must be a PNG file');
-        
-        // Build card JSON (V2 format via ccv3 for longer content support)
-        const cardData = {
-          data: {
-            name: fields.name || '',
-            description: fields.description || '',
-            personality: fields.personality || '',
-            scenario: fields.scenario || '',
-            first_mes: fields.first_mes || '',
-            mes_example: fields.mes_example || '',
-            system_prompt: fields.system_prompt || '',
-            creator: fields.creator || '',
-            creator_notes: fields.creator_notes || '',
-            character_version: fields.character_version || '1.0'
-          }
-        };
-        const jsonStr = JSON.stringify(cardData);
-        const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
-        const tEXtData = 'ccv3\0' + b64;
-        
-        // Find IEND position in source
-        let iendPos = -1;
-        let offset = 8;
-        while (offset < srcBytes.length - 8) {
-          const len = (srcBytes[offset] << 24) | (srcBytes[offset+1] << 16) | (srcBytes[offset+2] << 8) | srcBytes[offset+3];
-          const type = String.fromCharCode(srcBytes[offset+4], srcBytes[offset+5], srcBytes[offset+6], srcBytes[offset+7]);
-          if (type === 'IEND') { iendPos = offset; break; }
-          offset += 8 + len + 4;
-        }
-        if (iendPos < 0) { reject(new Error('Invalid PNG')); return; }
-        
-        // Build output: copy everything up to IEND, insert tEXt chunk, then IEND
-        const beforeIEND = srcBytes.slice(0, iendPos);
-        const iendChunk = srcBytes.slice(iendPos);
-        
-        const tEXtBytes = new TextEncoder().encode(tEXtData);
-        const chunkLen = tEXtBytes.length;
-        
-        // Build chunk: length(4) + 'tEXt'(4) + data + CRC(4)
-        const chunk = new Uint8Array(4 + 4 + chunkLen + 4);
-        chunk[0] = (chunkLen >> 24) & 0xFF;
-        chunk[1] = (chunkLen >> 16) & 0xFF;
-        chunk[2] = (chunkLen >> 8) & 0xFF;
-        chunk[3] = chunkLen & 0xFF;
-        chunk[4] = 116; chunk[5] = 69; chunk[6] = 88; chunk[7] = 116; // 'tEXt'
-        chunk.set(tEXtBytes, 8);
-        
-        // CRC32 (simplified)
-        const crcData = chunk.slice(4, 8 + chunkLen);
-        const crc = crc32(crcData);
-        chunk[8 + chunkLen] = (crc >> 24) & 0xFF;
-        chunk[8 + chunkLen + 1] = (crc >> 16) & 0xFF;
-        chunk[8 + chunkLen + 2] = (crc >> 8) & 0xFF;
-        chunk[8 + chunkLen + 3] = crc & 0xFF;
-        
-        const result = new Uint8Array(beforeIEND.length + chunk.length + iendChunk.length);
-        result.set(beforeIEND, 0);
-        result.set(chunk, beforeIEND.length);
-        result.set(iendChunk, beforeIEND.length + chunk.length);
-        
-        resolve(new Blob([result], { type: 'image/png' }));
-      } catch(err) { reject(err); }
-    };
-    reader.readAsArrayBuffer(avatarBuffer);
-  });
-}
 
 // Build system prompt from card fields
-function buildCardPrompt(fields) {
-  const parts = [];
-  if (fields.name) parts.push(fields.name);
-  if (fields.description) parts.push(fields.description);
-  if (fields.personality) parts.push('性格：' + fields.personality);
-  if (fields.scenario) parts.push('场景：' + fields.scenario);
-  const header = parts.length > 0 ? '[角色：' + parts.join('；') + ']' : '';
-  const sys = fields.system_prompt || '';
-  const example = fields.mes_example ? '\n# 对话示例\n' + fields.mes_example : '';
-  return [header, sys, example].filter(Boolean).join('\n\n');
-}
 
 // CRC32 table
 const crc32Table = new Uint32Array(256);
@@ -3881,11 +1618,6 @@ for (let i = 0; i < 256; i++) {
   let c = i;
   for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
   crc32Table[i] = c;
-}
-function crc32(data) {
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < data.length; i++) crc = crc32Table[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
-  return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
 
