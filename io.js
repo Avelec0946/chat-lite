@@ -55,23 +55,20 @@ const data = {
   version: 1,
   exportedAt: new Date().toISOString(),
   conversations: state.conversations,
+  convGroups: state.convGroups || [],   // 预留：批次5分组（main 无分组时为空数组，格式向前兼容）
   providers: state.providers,
   settings: exportSettings,
   currentId: state.currentId
 };
-  // 紧凑格式（无缩进），相比 null,2 节省约 30% 体积，备份格式不需要人工阅读
-  const jsonText = JSON.stringify(data);
   const fileName = 'chat-lite-backup-' + new Date().toISOString().slice(0, 10) + '.json';
 
   if (isCapacitor() && CapFilesystem && CapShare) {
+    // v1.4 重构（根治大备份 OOM）：108MB 级数据 JSON.stringify 全量峰值 ~3x 超 WebView 堆（192MB）卡退。
+    // 改为分块流式写：头部 writeFile + 分批 appendFile，峰值内存 = 单批大小（默认 30 条/200KB 刷盘）。
+    // 注意：此处绝不能在内存中构造完整 jsonText（那就是 OOM 点）。
     try {
-      const result = await CapFilesystem.writeFile({
-        path: fileName,
-        data: jsonText,           // 直接传 UTF-8 字符串，无需 base64 转换
-        directory: 'CACHE',
-        encoding: 'utf8',         // 关键：Filesystem 6.x 原生支持 UTF-8 写入
-        recursive: true
-      });
+      await exportAllDataStreamed(fileName, exportSettings);
+      const result = await CapFilesystem.getUri({ path: fileName, directory: 'CACHE' });
       await CapShare.share({
         title: 'chat-lite 数据备份',
         text: fileName,
@@ -84,7 +81,8 @@ const data = {
       showToast('导出失败：' + (err.message || err), 'danger');
     }
   } else {
-    // Web 模式
+    // Web 模式（数据量小，保持 Blob 全量构造）
+    const jsonText = JSON.stringify(data);
     const blob = new Blob([jsonText], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -94,6 +92,50 @@ const data = {
     URL.revokeObjectURL(url);
     showToast('已导出全部数据', 'success');
   }
+}
+
+// 分块流式导出（APK 专用，根治大备份 OOM）：
+// 头部一次 writeFile，conversations 逐批 appendFile（每 30 条 或累计 200KB 刷盘一次），尾部一次 appendFile。
+// 峰值内存 = 单批字符串 + 进度计数，与数据总量无关。
+async function exportAllDataStreamed(fileName, exportSettings) {
+  const DIR = 'CACHE';
+  const convs = state.conversations || [];
+  const total = convs.length;
+  const head = '{"version":1,"exportedAt":"' + new Date().toISOString() + '","convGroups":' +
+    JSON.stringify(state.convGroups || []) + ',"conversations":[';
+  await CapFilesystem.writeFile({ path: fileName, data: head, directory: DIR, encoding: 'utf8', recursive: true });
+  let first = true;          // 是否文件内第一条 conversation（控制逗号）
+  let buf = [];
+  let bufChars = 0;
+  const FLUSH_COUNT = 30;    // 每批条数
+  const FLUSH_CHARS = 200000; // 每批字符上限（保守，防单条超大会话撑爆）
+
+  async function flush() {
+    if (!buf.length) return;
+    const chunk = (first ? '' : ',') + buf.join(',');
+    first = false;
+    buf = [];
+    bufChars = 0;
+    await CapFilesystem.appendFile({ path: fileName, data: chunk, directory: DIR, encoding: 'utf8' });
+  }
+
+  for (let i = 0; i < total; i++) {
+    const piece = JSON.stringify(convs[i]);
+    buf.push(piece);
+    bufChars += piece.length;
+    if (buf.length >= FLUSH_COUNT || bufChars >= FLUSH_CHARS) {
+      await flush();
+      await new Promise(r => setTimeout(r, 0));   // yield：让 UI 线程喘息，避免"卡死"观感
+      if (i % Math.max(1, Math.floor(total / 10)) === 0) {
+        showToast('导出中 ' + Math.min(100, Math.round(i / total * 100)) + '%…', 'info');
+      }
+    }
+  }
+  await flush();
+  const tail = '],"providers":' + JSON.stringify(state.providers || []) +
+    ',"settings":' + JSON.stringify(exportSettings) +
+    ',"currentId":' + JSON.stringify(state.currentId) + '}';
+  await CapFilesystem.appendFile({ path: fileName, data: tail, directory: DIR, encoding: 'utf8' });
 }
 
 async function importAllData(jsonText, mode) {
@@ -179,7 +221,7 @@ async function importAllData(jsonText, mode) {
   if (mode === 'overwrite') {
     // 覆盖模式：直接替换
     if (data.conversations) state.conversations = data.conversations;
-    if (data.providers) state.providers = data.providers;
+    if (data.providers) { state.providers = data.providers; saveProviders(); }
     if (data.settings) {
       Object.assign(settings, data.settings);
       saveSettings();  // 走 IDB 持久化（不再用 localStorage）
@@ -200,6 +242,7 @@ async function importAllData(jsonText, mode) {
       const importedPIds = new Set(data.providers.map(p => p.id));
       const keptP = (state.providers || []).filter(p => !importedPIds.has(p.id));
       state.providers = keptP.concat(data.providers);
+      saveProviders();
     }
     if (data.settings) {
       Object.assign(settings, data.settings);
@@ -234,6 +277,23 @@ function importAllDataFromFile(e) {
       return;
     }
   }
+  // 预防式更新（v87）：APK + 覆盖模式走流式分块导入（根治大备份 JSON.parse 全量 OOM 卡退）
+  // 其他场景（Web / merge 模式 / 小文件）保持原全量路径
+  if (isCapacitor() && mode === 'overwrite' && typeof File !== 'undefined' && file.slice) {
+    importAllDataStreamed(file).then(function(ok) {
+      if (ok) {
+        showToast('已覆盖导入数据', 'success');
+        e.target.value = '';
+      } else {
+        e.target.value = '';
+      }
+    }).catch(function(err) {
+      console.error('Streamed import failed:', err);
+      showToast('导入失败：' + (err && err.message || err), 'danger');
+      e.target.value = '';
+    });
+    return;
+  }
   showToast('正在读取文件...', 'info');
   const reader = new FileReader();
   reader.onload = (ev) => {
@@ -244,6 +304,155 @@ function importAllDataFromFile(e) {
   };
   reader.readAsText(file);
   e.target.value = '';
+}
+
+// ===== 流式分块导入（APK 覆盖模式专用，根治 108MB 级大备份 OOM） =====
+// 原理：File.slice 分块 readAsText（2MB/块）+ 增量扫描 conversations 数组逐条 JSON.parse，
+//      峰值内存 = 单块缓冲 + 单条会话对象，与总量无关；头部/尾部小字段最后整体 parse。
+// 数据安全：overwrite 语义下先清空再逐条填充；解析失败 toast 报错（main 数据源仍在，可重新导出）。
+
+// 增量扫描器：从分块文本中定位 "conversations" 数组的起止，逐条提取顶层对象
+// 设计：feed 为无状态纯函数——扫描状态全部本地化；buf 只保留"未完成单元开头"
+//       （进行中的对象 '{' 或 未闭合字符串的 '"'），每块从开头无状态重扫（幂等），
+//       彻底规避跨块状态残留（字符串引号配对错乱）问题。
+// feed(chunk) → { objs: 完整对象字符串[], found: {posInChunk}|null, done: bool, tailText: string|null }
+function createConvScanner() {
+  var buf = '';
+  var phase = 0;      // 0=头部搜索 1=数组中 2=数组已结束（跨块阶段标记，非扫描状态）
+  var arrEnd = -1;
+  return {
+    feed: function(chunk) {
+      buf += chunk;
+      var out = [];
+      var found = null;
+      var tailText = null;
+      if (phase === 0) {
+        var ki = buf.indexOf('"conversations"');
+        if (ki >= 0) {
+          var ai = buf.indexOf('[', ki);
+          if (ai >= 0) {
+            found = { posInChunk: ai - (buf.length - chunk.length) };
+            phase = 1;
+            buf = buf.slice(ai + 1);
+            // 不 return：继续扫描本块剩余（小文件/大块场景整个文件可能在一个块内，剩余必须当场处理）
+          }
+        }
+        if (phase === 0) {
+          if (buf.length > 4 * 1024 * 1024) buf = buf.slice(buf.length - 4 * 1024 * 1024);
+          return { objs: out, found: null, done: false, tailText: null };
+        }
+      }
+      if (phase === 2) {
+        tailText = buf; buf = '';
+        return { objs: out, found: null, done: true, tailText: tailText };
+      }
+      // phase 1：无状态重扫（幂等）——状态全本地，由 buf 内容决定
+      var i = 0, depth = 0, objStart = -1, inStr = false, esc = false, strStart = -1;
+      while (i < buf.length) {
+        var c = buf[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c === '\\') esc = true;
+          else if (c === '"') inStr = false;
+          i++; continue;
+        }
+        if (c === '"') { inStr = true; strStart = i; i++; continue; }
+        if (objStart < 0) {
+          if (c === '{') { objStart = i; depth = 1; }
+          else if (c === ']') { phase = 2; arrEnd = i; break; }
+          i++; continue;
+        }
+        if (c === '{' || c === '[') depth++;
+        else if (c === '}' || c === ']') {
+          depth--;
+          if (depth === 0) { out.push(buf.slice(objStart, i + 1)); objStart = -1; }
+        }
+        i++;
+      }
+      if (phase === 2) {
+        tailText = buf.slice(arrEnd + 1); buf = '';
+        return { objs: out, found: found, done: true, tailText: tailText };
+      }
+      // 保留"未完成单元开头"：进行中对象 '{' 优先；否则未闭合字符串 '"'；否则全部消费
+      var keepFrom = objStart >= 0 ? objStart : (inStr ? strStart : buf.length);
+      buf = buf.slice(keepFrom);
+      return { objs: out, found: found, done: false, tailText: null };
+    }
+  };
+}
+
+async function importAllDataStreamed(file) {
+  const CHUNK = 2 * 1024 * 1024;   // 2MB/块
+  const total = file.size;
+  const scanner = createConvScanner();
+  const newConvs = [];
+  let headText = '';
+  let tailText = '';
+  let inConvs = false;      // 已进入 conversations 数组（headText 停止累积）
+  let done = false;
+  let offset = 0;
+
+  function readChunk(start, end) {
+    return new Promise(function(resolve, reject) {
+      const blob = file.slice(start, end);
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(r.error || new Error('read failed'));
+      r.readAsText(blob);
+    });
+  }
+
+  while (offset < total) {
+    const end = Math.min(offset + CHUNK, total);
+    const text = await readChunk(offset, end);
+    const res = scanner.feed(text);
+    if (!inConvs) {
+      if (res.found) { headText += text.slice(0, res.found.posInChunk); inConvs = true; }
+      else headText += text;   // phase 0 整块累积
+    }
+    for (let k = 0; k < res.objs.length; k++) {
+      newConvs.push(JSON.parse(res.objs[k]));   // 逐条 parse（单条小）
+    }
+    if (res.done) { done = true; if (res.tailText !== null) tailText += res.tailText; }   // 累积（phase 2 每块都是 tail 片段，覆盖会丢前段）
+    else if (done && res.tailText !== null) { tailText += res.tailText; }
+    offset = end;
+    if (offset % (CHUNK * 10) === 0) {
+      showToast('导入中 ' + Math.min(100, Math.round(offset / total * 100)) + '%…', 'info');
+    }
+    await new Promise(r => setTimeout(r, 0));   // yield
+  }
+  if (!done) throw new Error('备份格式异常：未找到 conversations 数组结束');
+
+  // 头部字段：headText 形如 {"version":1,"convGroups":[...],"conversations":  → 去掉尾部键 + 补根对象闭合
+  let headObj = {};
+  try {
+    const ht = headText.replace(/,\s*"conversations"\s*:\s*$/, '').trim();
+    headObj = JSON.parse(ht + '}');
+  } catch (e) { headObj = {}; }
+
+  // 尾部字段：tailText 形如 ,"providers":[...],...,"currentId":"x"}  → 去前导 ]/, 后包成对象
+  let tailObj = {};
+  const tailRaw = tailText.replace(/^[\s,\]]+/, '').trim();
+  if (tailRaw) { try { tailObj = JSON.parse('{' + tailRaw.slice(0, -1) + '}'); } catch (e) { tailObj = {}; } }
+
+  // 覆盖模式应用（先整体替换，峰值 = 解析缓冲 + 对象数组 ~1x；main 数据源在备份文件中，失败可重导）
+  state.conversations = newConvs;
+  if (Array.isArray(tailObj.providers)) { state.providers = tailObj.providers; saveProviders(); }
+  if (tailObj.settings && typeof tailObj.settings === 'object') Object.assign(settings, tailObj.settings);
+  if (headObj.convGroups && Array.isArray(headObj.convGroups)) state.convGroups = headObj.convGroups;
+  if (tailObj.currentId) state.currentId = tailObj.currentId;
+  else state.currentId = state.conversations.length > 0 ? state.conversations[0].id : null;
+
+  // 与全量导入一致的收尾
+  saveSettings();
+  save();
+  renderSidebar();
+  renderModelSelector();
+  if (state.currentId) renderMessages();
+  if (isCapacitor() && CapFilesystem && Array.isArray(settings.images)) {
+    migrateImportedImagesToFilesystem();
+  }
+  return true;
 }
 
 async function exportConversation() {

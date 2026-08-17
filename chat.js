@@ -492,6 +492,40 @@ async function continueGeneration(msgId) {
   await sendFromMessageContinue(context, msg);
 }
 
+// ===== B3: 状态栏指令构造（格式约定 templateRule + 规则约定 displayFields）=====
+// 格式约定：定义状态栏字段/格式形式，生成指令与示例；留空则仅要求输出 <status> 标签，不指定字段
+// 规则约定：字段的特殊规则说明，可留空；留空则不注入
+function statusBarExample(rule) {
+  return rule.split(/[,，、\s]+/).map(function(s) { return s.trim() + '：xxx'; }).filter(function(s) { return s !== '：xxx'; }).join('\\n');
+}
+function statusBarRuleText(sb) {
+  var rule = (sb.templateRule || '').trim();
+  var note = (sb.displayFields || '').trim();
+  var parts = [];
+  if (rule) {
+    parts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + rule + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>\\n' + statusBarExample(rule) + '\\n</status>');
+  } else {
+    parts.push('【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息，内容请根据上下文合理填写，保持角色一致性。');
+  }
+  if (note) parts.push('【规则约定】' + note);
+  return parts.join('\\n');
+}
+function statusBarMidText(sb) {
+  var rule = (sb.templateRule || '').trim();
+  if (rule) return '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容包括：' + rule;
+  return '【格式提醒】回复末尾须包含 <status>...</status> 标签输出状态信息，内容根据上下文合理填写';
+}
+function statusBarPostText(sb) {
+  var rule = (sb.templateRule || '').trim();
+  if (rule) return '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容包括：' + rule + '。这是强制格式要求，不可省略。';
+  return '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容根据上下文合理填写。这是强制格式要求，不可省略。';
+}
+function statusBarUserText(sb) {
+  var rule = (sb.templateRule || '').trim();
+  if (rule) return '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容包括：' + rule + '。这是强制要求，不可省略。';
+  return '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容根据上下文合理填写。这是强制要求，不可省略。';
+}
+
 // ===== 上下文构建 =====
 function buildContext(conv) {
   const msgs = [];
@@ -515,14 +549,9 @@ function buildContext(conv) {
       sysParts.push(mp.text.trim());
     }
   }
-  // B3: 状态栏指令（templateRule + displayFields 分离）
+  // B3: 状态栏指令（格式约定 templateRule + 规则约定 displayFields）
   if (sb && sb.enabled) {
-    var rule = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
-    var df = sb.displayFields || '';
-    var sbExample = rule.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
-    var ruleText = '【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + rule + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>\\n' + sbExample + '\\n</status>';
-    if (df) ruleText += '\\n（UI 仅展示以下字段，其余可省略：' + df + '）';
-    sysParts.push(ruleText);
+    sysParts.push(statusBarRuleText(sb));
   }
   // 用户身份（会话级）
   var userId = conv.userIdentity;
@@ -534,24 +563,26 @@ function buildContext(conv) {
 
   // Message history from active path
   const chain = getActiveChain(conv);
+  var histIdx = 0;
+  var sbMidCount = 0;
   for (const m of chain) {
     if (!m || m.role === 'system') continue;
+    histIdx++;
     let content = m.content;
     content = buildFileContent(m);
     msgs.push({ role: m.role, content });
 
-    // Mid-context injection: remind every 4 messages
-    if (sb && sb.enabled && msgs.length % 4 === 0) {
-      var ruleMid = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
-      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容包括：' + ruleMid });
+    // Mid-context injection: every 4 history messages, capped at 5 reminders
+    if (sb && sb.enabled && histIdx % 4 === 0 && sbMidCount < 5) {
+      msgs.push({ role: 'system', content: statusBarMidText(sb) });
+      sbMidCount++;
     }
   }
 
   // Post-History Instruction: status bar reminder right before generation
   if (sb && sb.enabled) {
-    var rulePost = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容包括：' + rulePost + '。这是强制格式要求，不可省略。' });
-    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容包括：' + rulePost + '。这是强制要求，不可省略。' });
+    msgs.push({ role: 'system', content: statusBarPostText(sb) });
+    msgs.push({ role: 'user', content: statusBarUserText(sb) });
   }
 
   return msgs;
@@ -579,14 +610,9 @@ function buildContextForContinue(conv, targetMsg) {
       sysParts.push(mp.text.trim());
     }
   }
-  // B3: 状态栏指令
+  // B3: 状态栏指令（格式约定 templateRule + 规则约定 displayFields）
   if (sb && sb.enabled) {
-    var rule = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
-    var df = sb.displayFields || '';
-    var sbExample = rule.split(/[,，、]/).map(function(s){ return s.trim()+'：xxx'; }).join('\\n');
-    var ruleText = '【状态栏指令】每次回复末尾，请用 <status>...</status> 标签输出角色当前状态信息。状态栏应包含以下内容：' + rule + '。请根据上下文合理填写数值和描述，保持角色一致性。示例格式：\\n<status>\\n' + sbExample + '\\n</status>';
-    if (df) ruleText += '\\n（UI 仅展示以下字段，其余可省略：' + df + '）';
-    sysParts.push(ruleText);
+    sysParts.push(statusBarRuleText(sb));
   }
   // 用户身份（会话级）
   var userId = conv.userIdentity;
@@ -601,22 +627,24 @@ function buildContextForContinue(conv, targetMsg) {
     current = conv.messageMap[current.parentId];
   }
 
+  var histIdx = 0;
+  var sbMidCount = 0;
   for (const m of chain) {
     if (!m || m.role === 'system') continue;
+    histIdx++;
     let content = m.content;
     content = buildFileContent(m);
     msgs.push({ role: m.role, content });
 
-    if (sb && sb.enabled && msgs.length % 4 === 0) {
-      var ruleMid = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
-      msgs.push({ role: 'system', content: '【格式提醒】回复末尾须包含 <status>...</status> 标签，内容包括：' + ruleMid });
+    if (sb && sb.enabled && histIdx % 4 === 0 && sbMidCount < 5) {
+      msgs.push({ role: 'system', content: statusBarMidText(sb) });
+      sbMidCount++;
     }
   }
 
   if (sb && sb.enabled) {
-    var rulePost = sb.templateRule || '当前地点、当前行动、当前穿搭、内心独白';
-    msgs.push({ role: 'system', content: '【格式提醒】你的每次回复必须在最末尾包含 <status>...</status> 标签的状态栏，内容包括：' + rulePost + '。这是强制格式要求，不可省略。' });
-    msgs.push({ role: 'user', content: '【格式要求】你必须在本次回复的最末尾，用 <status>...</status> 标签输出状态栏，内容包括：' + rulePost + '。这是强制要求，不可省略。' });
+    msgs.push({ role: 'system', content: statusBarPostText(sb) });
+    msgs.push({ role: 'user', content: statusBarUserText(sb) });
   }
 
   return msgs;
@@ -696,6 +724,10 @@ async function executeStreamHttp(req, assistantMsg, opts) {
       chunkListener = await CapStreamHttp.addListener('chunk', (data) => {
         if (data.id !== streamId) return;
 
+        // idle timeout：收到任一有效 chunk 即重置计时器
+        // 长程思考时模型持续返回 reasoning_content，不会被绝对总时长截断
+        resetIdleTimeout();
+
         chunkBuffer += data.chunk;
         const lines = chunkBuffer.split('\n');
         chunkBuffer = lines.pop() || '';
@@ -749,16 +781,21 @@ async function executeStreamHttp(req, assistantMsg, opts) {
         reject(new Error(data.error || '流式请求错误'));
       });
 
-      // 超时
-      timeoutId = setTimeout(() => {
-        if (streamId) {
-          try { CapStreamHttp.cancelStream({ id: streamId }); } catch(e) {}
-        }
-        if (resolved) return;
-        resolved = true;
-        cleanup();
-        reject(new Error('请求超时（' + (timeoutMs / 1000) + ' 秒）'));
-      }, timeoutMs);
+      // 超时（idle 语义：流式数据持续流动时不触发，仅无数据流动超过 timeoutMs 时触发）
+      // 长程思考时模型持续返回 reasoning_content，每次收到 chunk 重置计时器，避免被绝对总时长截断
+      function resetIdleTimeout() {
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          if (streamId) {
+            try { CapStreamHttp.cancelStream({ id: streamId }); } catch(e) {}
+          }
+          if (resolved) return;
+          resolved = true;
+          cleanup();
+          reject(new Error('请求超时（' + (timeoutMs / 1000) + ' 秒无数据流动）'));
+        }, timeoutMs);
+      }
+      resetIdleTimeout();
 
       // 启动流式请求（stream 必须为 true）
       const payload = Object.assign({}, req.payload, { stream: true });
