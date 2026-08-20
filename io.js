@@ -898,6 +898,275 @@ function generateCharacterCard(fields, avatarBuffer) {
     reader.readAsArrayBuffer(avatarBuffer);
   });
 }
+// ===== 扩展数据自然语言解读（酒馆生态卡专用）=====
+// 背景：PNG 角色卡常携带酒馆（SillyTavern）生态的机器规则——tavern_helper 脚本（MVU 变量系统）、
+//       正则替换规则（HTML 状态栏美化、标记清理）、深度提示词、世界书等。chat-lite 不执行这些规则，
+//       本组函数将其翻译为自然语言规则说明，让用户看得懂、可选择性复制。
+function extractSchemaKeys(content) {
+  // 多行缩进格式：逐行跟踪 z.object({...}) 深度提取键名（支持嵌套）
+  const lines = String(content || '').split('\n');
+  if (lines.length > 1) {
+    const keys = [];
+    let depth = 0, inObj = false;
+    for (const line of lines) {
+      const t = line.trim();
+      if (!inObj) {
+        if (t.indexOf('z.object({') >= 0) { inObj = true; depth = 1; continue; }
+        continue;
+      }
+      const opens = (t.match(/\{/g) || []).length;
+      const closes = (t.match(/\}/g) || []).length;
+      const m = t.match(/^([^:{\s]+):/);
+      if (m) keys.push(m[1].replace(/['"]/g, ''));
+      depth += opens - closes;
+      if (depth <= 0) break;
+    }
+    if (keys.length) return keys;
+  }
+  // 单行/紧凑格式兜底：全局提取「键名:」
+  const keys2 = [];
+  const re = /([^:{\s,()][^:{\s,()]*)\s*:/g;
+  let mm;
+  while ((mm = re.exec(String(content || ''))) !== null) {
+    const k = mm[1].trim();
+    if (k && !/\s/.test(k) && k.indexOf('z.object') < 0) keys2.push(k);
+  }
+  return keys2;
+}
+
+function explainScript(s) {
+  const name = s.name || '未命名脚本';
+  const content = String(s.content || '');
+  const parts = ['「' + name + '」'];
+  if (s.enabled === false) parts.push('（已禁用）');
+  if (content.indexOf('registerMvuSchema') >= 0 || content.indexOf('z.object({') >= 0) {
+    const keys = extractSchemaKeys(content);
+    parts.push('定义变量系统：' + (keys.length ? keys.join('、') : '（Schema 定义）'));
+  } else {
+    const imp = content.match(/import\s*['"]([^'"]+)['"]/);
+    if (imp) {
+      const libPath = imp[1];
+      // 优先取路径中的仓库/库名（支持 github 域与 jsdelivr /gh/ 路径），去版本后缀与扩展名
+      const gh = libPath.match(/(?:github\.com\/|gh\/)([^/]+)\/([^/@]+)/);
+      let lib = gh ? gh[2] : (libPath.split('/').filter(Boolean).pop() || libPath);
+      lib = lib.replace(/\.(js|mjs|ts)$/, '').replace(/@.*$/, '').trim();
+      parts.push('引入外部库：' + (lib || libPath));
+    } else {
+      parts.push('脚本代码（' + content.length + ' 字符）' + (content ? '：' + content.slice(0, 40).replace(/\n/g, ' ') : ''));
+    }
+  }
+  return parts.join('');
+}
+
+function explainRegexScript(r) {
+  const name = r.scriptName || '未命名规则';
+  const find = String(r.findRegex || '');
+  const replace = String(r.replaceString || '');
+  const parts = ['「' + name + '」'];
+  if (r.disabled) parts.push('（已禁用）');
+  // 替换行为
+  if (!replace.trim()) {
+    parts.push('删除匹配内容');
+  } else if (replace.length > 200 && (replace.indexOf('<div') >= 0 || replace.indexOf('<style') >= 0 || replace.indexOf('```html') >= 0)) {
+    parts.push('渲染为 HTML 界面组件（美化展示）');
+  } else if (replace.length > 200) {
+    parts.push('替换为长文本（' + replace.length + ' 字符）');
+  } else {
+    parts.push('替换为：' + replace.slice(0, 60).replace(/\n/g, ' '));
+  }
+  // 作用域
+  if (r.promptOnly) parts.push('仅作用于发送给 AI 的提示词');
+  if (r.markdownOnly) parts.push('仅作用于界面显示');
+  if (r.runOnEdit) parts.push('编辑消息时执行');
+  // 匹配对象推断
+  const f = find.replace(/^\/|\/[dgimsuvy]*$/g, '');
+  let target = null;
+  if (/StatusPlaceHolder/i.test(f)) target = '状态占位标记 <StatusPlaceHolderImpl/>';
+  else if (/Analysis/i.test(f)) target = '思维链内容 <Analysis>…</Analysis>';
+  else if (/UpdateVariable/i.test(f)) target = '变量更新标记 <UpdateVariable>…</UpdateVariable>';
+  else if (/content/i.test(f)) target = '内容标签 <content>';
+  parts.push('匹配：' + (target || (find ? find.slice(0, 50) + (find.length > 50 ? '…' : '') : '（无正则）')));
+  return parts.join('；');
+}
+
+function explainExtensions(ext) {
+  const lines = [];
+  // 基础字段
+  const basics = [];
+  if (ext.talkativeness !== undefined && ext.talkativeness !== null) {
+    const t = Number(ext.talkativeness);
+    basics.push('话痨度 ' + t + (t >= 0.7 ? '（健谈）' : t >= 0.3 ? '（适中）' : '（偏安静）'));
+  }
+  if (ext.world) basics.push('世界观「' + ext.world + '」');
+  if (ext.fav !== undefined) basics.push('收藏标记 ' + ext.fav);
+  if (basics.length) lines.push('● ' + basics.join('；') + '。');
+  // 深度提示词
+  if (ext.depth_prompt && typeof ext.depth_prompt === 'object') {
+    const dp = ext.depth_prompt;
+    const dpParts = [];
+    if (dp.depth) dpParts.push('深度 ' + dp.depth + ' 层');
+    if (dp.role) dpParts.push('注入角色 ' + dp.role);
+    if (dp.prompt) dpParts.push('内容：' + String(dp.prompt).slice(0, 80));
+    if (dpParts.length) lines.push('● 深度提示词配置：' + dpParts.join('，') + '。');
+  }
+  // 脚本（tavern_helper.scripts）
+  const scripts = (ext.tavern_helper && Array.isArray(ext.tavern_helper.scripts)) ? ext.tavern_helper.scripts : [];
+  if (scripts.length) {
+    lines.push('● 变量与脚本（' + scripts.length + ' 个）：');
+    scripts.forEach(function(s) { lines.push('  - ' + explainScript(s)); });
+  }
+  // 正则规则（tavern_helper.regex_scripts 优先，顶层 regex_scripts 按 id 去重补充）
+  const seen = {};
+  const regexes = [];
+  const thRegex = (ext.tavern_helper && Array.isArray(ext.tavern_helper.regex_scripts)) ? ext.tavern_helper.regex_scripts : [];
+  const topRegex = Array.isArray(ext.regex_scripts) ? ext.regex_scripts : [];
+  thRegex.concat(topRegex).forEach(function(r) {
+    const id = r.id || r.scriptName || JSON.stringify(r).slice(0, 40);
+    if (!seen[id]) { seen[id] = true; regexes.push(r); }
+  });
+  if (regexes.length) {
+    lines.push('● 正则替换规则（' + regexes.length + ' 条）：');
+    regexes.forEach(function(r) { lines.push('  - ' + explainRegexScript(r)); });
+  }
+  // 未识别扩展字段：简单值（人话字符串/数字/布尔）直接展示，机器数据仅提示数量
+  const knownKeys = ['talkativeness', 'fav', 'world', 'depth_prompt', 'tavern_helper', 'regex_scripts'];
+  const unknownSimple = [];
+  const unknownComplex = [];
+  for (const k of Object.keys(ext)) {
+    if (knownKeys.indexOf(k) >= 0) continue;
+    const v = ext[k];
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'number' || typeof v === 'boolean') {
+      unknownSimple.push(k + '：' + String(v));
+    } else if (typeof v === 'string') {
+      const s = String(v).trim();
+      const looksMachine = /[<>{}\[\]\\/]/.test(s) || /\b(function|const|let|import|export|script|html|json|prompt)\b/i.test(s);
+      if (s && s.length <= 80 && !looksMachine && s.indexOf('\n') < 0) unknownSimple.push(k + '：' + s);
+      else unknownComplex.push(k);
+    } else {
+      unknownComplex.push(k);
+    }
+  }
+  if (unknownSimple.length) lines.push('● 其他扩展字段：' + unknownSimple.join('；') + '。');
+  if (unknownComplex.length) lines.push('● 另有未识别扩展字段 ' + unknownComplex.length + ' 个（' + unknownComplex.join('、') + '），机器数据已省略。');
+  return lines.join('\n');
+}
+
+// 角色卡字段 → 带标签大文本（完整呈现解析内容，空字段跳过，可编辑后反解析）
+// 定位：角色卡栏目作为 PNG 角色卡内容解析工具——大文本框完整呈现卡内全部内容，用户按需复制
+function formatCardFields(data) {
+  const labelMap = [
+    ['name', '名称'],
+    ['description', '简介'],
+    ['personality', '性格'],
+    ['scenario', '场景'],
+    ['first_mes', '开场白'],
+    ['mes_example', '示例对话'],
+    ['system_prompt', '系统提示词'],
+    ['creator', '作者'],
+    ['character_version', '版本'],
+    ['creator_notes', '备注']
+  ];
+  const lines = [];
+  for (const [key, label] of labelMap) {
+    const v = data[key];
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (!s) continue;
+    lines.push('【' + label + '】' + s);
+  }
+  // 替代开场白（多条）
+  if (Array.isArray(data.alternate_greetings) && data.alternate_greetings.length) {
+    lines.push('【替代开场白】');
+    data.alternate_greetings.forEach(function(g, i) {
+      const gs = String(g || '').trim();
+      if (gs) lines.push((i + 1) + '. ' + gs);
+    });
+  }
+  // 标签
+  if (Array.isArray(data.tags) && data.tags.length) {
+    lines.push('【标签】' + data.tags.join(', '));
+  }
+  // 扩展数据（自然语言解读——酒馆机器规则翻译成人话）
+  if (data.extensions && typeof data.extensions === 'object' && Object.keys(data.extensions).length) {
+    const explained = explainExtensions(data.extensions);
+    if (explained) {
+      lines.push('【扩展数据解读】' + explained);
+    } else {
+      lines.push('【扩展数据】' + JSON.stringify(data.extensions));
+    }
+  }
+  // 世界书（lorebook，自然语言设定 + 触发规则元信息）
+  if (data.character_book && Array.isArray(data.character_book.entries) && data.character_book.entries.length) {
+    const cb = data.character_book;
+    const headerParts = [];
+    if (cb.name && String(cb.name).trim()) headerParts.push('「' + String(cb.name).trim() + '」');
+    if (cb.description && String(cb.description).trim()) headerParts.push(String(cb.description).trim());
+    let head = '【世界书（知识库）】' + (headerParts.length ? ' ' + headerParts.join(' ') : '');
+    const cfg = [];
+    if (cb.scan_depth !== undefined && cb.scan_depth !== null) cfg.push('扫描深度 ' + cb.scan_depth + ' 层');
+    if (cb.token_budget !== undefined && cb.token_budget !== null) cfg.push('令牌预算 ' + cb.token_budget);
+    if (cb.recursive_scanning !== undefined && cb.recursive_scanning !== null) cfg.push('递归扫描 ' + (cb.recursive_scanning ? '开' : '关'));
+    if (cfg.length) head += '（' + cfg.join('；') + '）';
+    lines.push(head);
+    data.character_book.entries.forEach(function(e, i) {
+      const title = (e.comment || '').trim() || (Array.isArray(e.keys) && e.keys.length ? e.keys.join('、') : ('条目 ' + (i + 1)));
+      let item = (i + 1) + '. 「' + title + '」';
+      const meta = [];
+      if (Array.isArray(e.keys) && e.keys.length) meta.push('关键词：' + e.keys.join('、'));
+      if (Array.isArray(e.secondary_keys) && e.secondary_keys.length) meta.push('副关键词：' + e.secondary_keys.join('、'));
+      if (e.enabled === false) meta.push('停用');
+      if (e.position === 'before_char') meta.push('注入角色前');
+      else if (e.position === 'after_char') meta.push('注入角色后');
+      if (meta.length) item += '【' + meta.join('；') + '】';
+      lines.push(item);
+      const content = String(e.content || '').trim();
+      if (content) lines.push(content);
+    });
+  }
+  // 对话后指令
+  if (data.post_history_instructions && String(data.post_history_instructions).trim()) {
+    lines.push('【对话后指令】' + String(data.post_history_instructions).trim());
+  }
+  return lines.join('\n');
+}
+
+// 带标签大文本 → 字段对象（导出用；缺字段填空值，容错解析）
+function parseCardText(text) {
+  const labelMap = {
+    '名称': 'name', '简介': 'description', '性格': 'personality', '场景': 'scenario',
+    '开场白': 'first_mes', '示例对话': 'mes_example', '系统提示词': 'system_prompt',
+    '作者': 'creator', '版本': 'character_version', '备注': 'creator_notes'
+  };
+  const fields = { name:'', description:'', personality:'', scenario:'', first_mes:'', mes_example:'', system_prompt:'', creator:'', creator_notes:'', character_version:'1.0' };
+  const lines = String(text || '').split('\n');
+  let current = null;
+  for (const line of lines) {
+    const m = line.match(/^【(.+?)】(.*)$/);
+    if (m && labelMap[m[1]]) {
+      current = labelMap[m[1]];
+      fields[current] = m[2].trim();
+      continue;
+    }
+    if (m && (m[1] === '标签' || m[1] === '扩展数据')) { current = null; continue; }
+    if (m && m[1] === '替代开场白') { current = 'alternate_greetings'; continue; }
+    // 其他【标签】块（如【扩展数据解读】【世界书】）：未知语义块，跳过其后续内容，不混入字段
+    if (m) { current = null; continue; }
+    if (current === 'alternate_greetings') {
+      const nm = line.match(/^\d+\.\s*(.*)$/);
+      if (nm) {
+        if (!Array.isArray(fields.alternate_greetings)) fields.alternate_greetings = [];
+        fields.alternate_greetings.push(nm[1].trim());
+      }
+      continue;
+    }
+    if (current && current !== 'alternate_greetings') {
+      fields[current] = fields[current] ? fields[current] + '\n' + line : line;
+    }
+  }
+  return fields;
+}
+
 function buildCardPrompt(fields) {
   const parts = [];
   if (fields.name) parts.push(fields.name);
