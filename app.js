@@ -44,6 +44,12 @@ const state = {
   _isTouching: false,
   // 当前正在流式输出的 assistantMsg（松手后立即渲染）
   _streamingMsg: null,
+  // v99: 生图——用户主动停止标记（区分「停止」与「超时」的 AbortError）
+  _imageStopRequested: false,
+  // v99: 生图——同接口连续失败计数（≥3 熔断提示检查配置）
+  _imageProviderFailStreak: {},
+  // v99: 生图——进度状态（阶段/已等待秒数/重试信息/下载进度）
+  _imageProgress: null,
 };
 
 // STORAGE_KEY / SETTINGS_KEY 已迁移到 db.js
@@ -268,7 +274,7 @@ async function loadFromServer() {
 
 // defaultSettings / migrateSettings 已迁移到 db.js
 
-// 从 IndexedDB 异步加载 settings，首次启动时从旧 localStorage 迁移
+// 从 IndexedDB 异步加载 settings，IDB 无数据时从 localStorage 镜像兜底
 // init() 中 await 调用；失败时使用内存中的默认值，不阻断启动
 async function initSettings() {
   // 1. 先尝试从 IDB 读
@@ -276,29 +282,29 @@ async function initSettings() {
     var idbData = await idbGet(SETTINGS_IDB_KEY);
     if (idbData && typeof idbData === 'object') {
       settings = migrateSettings(idbData);
+      // v97 方案B：同步镜像到 localStorage（保持兜底副本最新；首次升级后立即生效）
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch(e) {}
       _settingsLoaded = true;
       return;
     }
   } catch(e) { console.warn('initSettings: IDB read failed:', e); }
 
-  // 2. IDB 无数据：尝试从旧 localStorage 迁移（仅一次）
+  // 2. IDB 无数据：从 localStorage 镜像读取（v97 方案B 起镜像常驻，不再一次性迁移后删除）
   try {
     var raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       var s = JSON.parse(raw);
       settings = migrateSettings(s);
-      // 写入 IDB，迁移成功后清理 localStorage
+      // 写回 IDB（镜像为主源时补主存）
       try {
         await idbPut(SETTINGS_IDB_KEY, settings);
-        localStorage.removeItem(SETTINGS_KEY);
-        console.log('[chat-lite] settings 已从 localStorage 迁移到 IndexedDB');
       } catch(e2) {
-        console.warn('[chat-lite] settings 迁移到 IDB 失败，保留 localStorage:', e2);
+        console.warn('[chat-lite] settings 写回 IDB 失败，localStorage 镜像保留:', e2);
       }
       _settingsLoaded = true;
       return;
     }
-  } catch(e) { console.warn('initSettings: localStorage 迁移失败:', e); }
+  } catch(e) { console.warn('initSettings: localStorage 读取失败:', e); }
 
   // 3. 都没有：使用默认值
   settings = defaultSettings();
@@ -901,16 +907,18 @@ function newChat() {
 // 复制成功反馈：复用 setStatus('saved') 机制
 
 // 流式振感反馈（_initStreamHaptics / triggerHapticFeedback 及五档常量）已迁移到 haptics.js
-// ===== C1: 回到底部按钮 =====
-// 距底 >200px 显示，<200px 隐藏；点击平滑滚到底
+// ===== C1: 回到底部/顶部 方向按钮 =====
+// 距底/距顶均 >200px 时才显示（顶部/底部附近均不显示，滑动离开后出现）；图标跟随最近滚动方向：
+// 往上滚(看历史)->向上箭头点击回顶部；往下滚(看新消息)->向下箭头点击回底部
+const _SCROLL_BTN_ICONS = {
+  down: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>',
+  up: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>'
+};
 function initScrollBottomButton() {
   if (document.getElementById('btn-scroll-bottom')) return;
   const btn = document.createElement('button');
   btn.id = 'btn-scroll-bottom';
   btn.className = 'btn-scroll-bottom';
-  btn.title = '回到底部';
-  btn.setAttribute('aria-label', '回到底部');
-  btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
   btn.style.display = 'none';
   // 插到 input-area 之前（浮在 input 上方右侧）
   const inputArea = document.getElementById('input-area');
@@ -919,15 +927,34 @@ function initScrollBottomButton() {
   } else {
     document.body.appendChild(btn);
   }
-  // 监听滚动
+  let mode = 'down';          // 'down'=回底部(默认/现状) | 'up'=回顶部
+  let lastScrollTop = messagesEl.scrollTop;
+  // 初始默认向下箭头(回底部)
+  btn.innerHTML = _SCROLL_BTN_ICONS.down;
+  btn.title = '回到底部';
+  btn.setAttribute('aria-label', '回到底部');
+  function setMode(m) {
+    if (mode === m) return;
+    mode = m;
+    btn.innerHTML = _SCROLL_BTN_ICONS[m];
+    const label = (m === 'up') ? '回到顶部' : '回到底部';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  }
+  // 监听滚动：更新方向 + 显隐
   const onScroll = function() {
-    const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
-    btn.style.display = (distFromBottom > 200) ? 'flex' : 'none';
+    const st = messagesEl.scrollTop;
+    if (st < lastScrollTop) setMode('up');        // 往上滚(看历史) -> 回顶部
+    else if (st > lastScrollTop) setMode('down'); // 往下滚(看新消息) -> 回底部
+    lastScrollTop = st;
+    const distFromBottom = messagesEl.scrollHeight - st - messagesEl.clientHeight;
+    // 顶部/底部附近都不显示，滑动离开后才出现
+    btn.style.display = (distFromBottom > 200 && st > 200) ? 'flex' : 'none';
   };
   messagesEl.addEventListener('scroll', onScroll, { passive: true });
-  // 点击平滑滚到底
+  // 点击按当前方向平滑滚动
   btn.addEventListener('click', function() {
-    messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+    messagesEl.scrollTo({ top: (mode === 'up') ? 0 : messagesEl.scrollHeight, behavior: 'smooth' });
     btn.style.display = 'none';
   });
   // 初始检查一次

@@ -118,6 +118,12 @@ function defaultSettings() {
   return {
     thinkingEnabled: true, apiKey: '', fontSize: '15', lineSpacing: '1.6',
     directMode: false, hapticFeedback: true, nativeStreamingMode: 'auto', nativeTimeoutMs: 120000,
+    // v99: 生图专用总超时（毫秒，默认 600s=10 分钟；聊天 nativeTimeoutMs 不影响生图）
+    imageNativeTimeoutMs: 600000,
+    // v101: 生图 prompt 前缀体系（全局正面前缀/负面前缀/消息模板，参照酒馆思路自行实现）
+    imagePromptPrefix: '',
+    imageNegativePrefix: '',
+    imagePromptTemplate: '',
     // B2: 分模型修饰语 {"<providerId>:<modelId>": {text: "修饰语\n\n===强调===\n强调内容"}}
     modelPrompts: {},
     // C5: 设置分组收折状态记忆 {groupKey: true=折叠/false=展开}
@@ -194,6 +200,14 @@ function saveSettings() {
       if (lite.thumbnailDataUrl) lite.thumbnailDataUrl = null;
       return lite;
     });
+  }
+  // v97 方案B（最小冗余）：settings 同步镜像一份到 localStorage（不含大 base64，体积可控）。
+  // IndexedDB 目录丢失时（2026-08-21 实测事故：WebView 更新/损坏重建清掉 app_webview/Default/IndexedDB），
+  // localStorage 镜像可兜底恢复配置；读取时 IDB 优先、镜像兜底。镜像常驻不删除。
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(toPersist));
+  } catch(e) {
+    console.warn('saveSettings: localStorage 镜像写入失败:', e);
   }
   // 异步写 IDB，不阻塞 UI；写入失败仅提示
   idbPut(SETTINGS_IDB_KEY, toPersist).then(function() {

@@ -1,6 +1,6 @@
 // ===== conversation.js : 会话管理模块（v2.0 拆分）=====
 // 模块名：conversation.js
-// 版本：v83（cache-bust）
+// 版本：v110（cache-bust）
 // 迁移日期：2026-07-26
 // 来源：从 app.js 拆分
 // 职责：会话模型、会话列表渲染、消息渲染、分支树（SVG）、分支搜索、长按菜单、冲突对话框
@@ -122,6 +122,48 @@ function getBranchPath(conv, leafId) {
     current = msg.parentId;
   }
   return path;
+}
+
+// v108：节点跳转"完整链延伸"——根→nodeId 回溯 + nodeId→叶子延伸（后续消息不截断）
+function getBranchPathToLeaf(conv, nodeId) {
+  // 1) 根→nodeId 回溯（路径含 nodeId 本身）
+  const up = [];
+  let cur = nodeId;
+  while (cur) {
+    up.unshift(cur);
+    const m = conv.messageMap[cur];
+    if (!m || !m.parentId) break;
+    cur = m.parentId;
+  }
+  // 2) nodeId→叶子：优先沿用当前 activePath 后续段（保持用户当前分支）
+  let down = [];
+  const ap = conv.activePath || [];
+  const ai = ap.indexOf(nodeId);
+  if (ai >= 0 && ai < ap.length - 1) {
+    const tail = ap.slice(ai + 1);
+    let ok = true, prev = nodeId;
+    for (const id of tail) {
+      const m = conv.messageMap[id];
+      if (!m || m.parentId !== prev) { ok = false; break; }
+      prev = id;
+    }
+    if (ok) down = tail;
+  }
+  // 3) 无可用延续段：沿 children[0] 走到叶子（防环）
+  if (down.length === 0) {
+    const seen = new Set([nodeId]);
+    let c = nodeId;
+    for (;;) {
+      const m = conv.messageMap[c];
+      if (!m || !m.children || m.children.length === 0) break;
+      const next = m.children[0];
+      if (seen.has(next)) break;
+      seen.add(next);
+      down.push(next);
+      c = next;
+    }
+  }
+  return up.concat(down);
 }
 
 // ===== 会话渲染 =====
@@ -510,6 +552,23 @@ function showBubbleContextMenu(event, msg) {
     });
   }
 
+  // 改名
+  addItem('更改会话标签名称', function() {
+    const newName = prompt('输入新名称:', msg.title || '');
+    if (newName !== null && newName.trim()) {
+      msg.title = newName.trim();
+      save();
+      renderMessages();
+      refreshBranchTree();
+      showToast('已更改标签在分支总览中显示的名称', 'success');
+    }
+  });
+  // 选色（色板弹窗）
+  addItem('更改会话标签颜色', function() {
+    openNodeColorPicker(msg, function() {
+      showToast('已更改标签在分支总览中显示的颜色', 'success');
+    });
+  });
   // 编辑（仅 user）
   if (msg.role === 'user') addItem('编辑', function() { enterEditMode(msg.id); });
   // 重新生成（仅 assistant）
@@ -540,6 +599,59 @@ function showBubbleContextMenu(event, msg) {
     document.addEventListener('contextmenu', closeBubbleContextMenu, { once: true });
     document.addEventListener('scroll', closeBubbleContextMenu, { once: true });
   }, 50);
+}
+
+// ===== 节点选色色板（分支总览 + 气泡菜单共用）=====
+function openNodeColorPicker(msg, onColorApplied) {
+  if (!msg) return;
+  closeNodeColorPicker();
+  const cur = msg.color || null;
+  let gridHtml = '';
+  for (let i = 0; i < NODE_COLORS.length; i++) {
+    const c = NODE_COLORS[i];
+    const active = c.value === cur;
+    gridHtml += '<div class="color-swatch' + (active ? ' active' : '') + '" data-idx="' + i + '" style="background:' + (c.value || '#888888') + '" title="' + c.name + '"></div>';
+  }
+  const picker = document.createElement('div');
+  picker.id = 'node-color-picker';
+  picker.className = 'node-color-picker';
+  picker.innerHTML = '<div class="color-swatch-grid">' + gridHtml + '</div>';
+  document.body.appendChild(picker);
+
+  // 点击色块：立即生效并关闭
+  picker.querySelectorAll('.color-swatch').forEach(function(swatch) {
+    swatch.addEventListener('click', function() {
+      const idx = parseInt(this.dataset.idx);
+      if (idx >= 0 && idx < NODE_COLORS.length && NODE_COLORS[idx].value !== msg.color) {
+        msg.color = NODE_COLORS[idx].value;
+        save();
+        refreshBranchTree();
+        renderMessages();
+        if (typeof onColorApplied === 'function') onColorApplied();
+      }
+      closeNodeColorPicker();
+    });
+  });
+
+  // 点击外部关闭
+  setTimeout(function() {
+    document.addEventListener('click', closeNodeColorPicker, { once: true });
+  }, 50);
+}
+
+function closeNodeColorPicker() {
+  const el = document.getElementById('node-color-picker');
+  if (el) el.remove();
+}
+
+function refreshBranchTree() {
+  const conv = currentConv();
+  const drawer = document.getElementById('branch-drawer');
+  if (!conv || !drawer || drawer.style.display === 'none') return;
+  document.getElementById('branch-tree').innerHTML = renderTreeSVG(conv);
+  applyBranchZoom();
+  initPinchZoom();
+  bindTreeNodeLongPress();
 }
 
 // ===== 分支抽屉 + 搜索 =====
@@ -820,13 +932,28 @@ function escapeSvg(str) {
 window.svgNodeClick = function(nodeId) {
   const conv = currentConv();
   if (!conv) return;
-  const newPath = getBranchPath(conv, nodeId);
+  const newPath = getBranchPathToLeaf(conv, nodeId);
   conv.activePath = newPath;
   save();
   renderMessages();
   renderBreadcrumb(conv);
   closeBranchDrawer();
+  scrollMessagesTo(nodeId);
 };
+
+// v108：节点跳转后滚动定位到目标节点消息（可视区垂直居中）
+function scrollMessagesTo(msgId) {
+  if (!msgId) return;
+  let el = null;
+  const msgs = messagesEl.querySelectorAll('.message');
+  for (const m of msgs) {
+    if (m.dataset.id === msgId) { el = m; break; }
+  }
+  if (!el) return;
+  const cRect = messagesEl.getBoundingClientRect();
+  const eRect = el.getBoundingClientRect();
+  messagesEl.scrollTop = messagesEl.scrollTop + (eRect.top - cRect.top) - messagesEl.clientHeight / 2 + el.clientHeight / 2;
+}
 
 function applyBranchZoom() {
   const svg = document.querySelector('.branch-svg');
@@ -895,17 +1022,7 @@ function showTreeNodeMenu(event, nodeId) {
   colorBtn.innerHTML = ICON.palette + ' 选色';
   colorBtn.addEventListener('click', function() {
     closeTreeNodeMenu();
-    const colorList = NODE_COLORS.map((c,i) => `${i}. ${c.name}`).join('\n');
-    const curIdx = msg.color ? NODE_COLORS.findIndex(c => c.value === msg.color) : 0;
-    const idx = prompt('选择颜色:\n' + colorList + '\n输入数字:', curIdx.toString());
-    if (idx !== null) {
-      const ci = parseInt(idx) || 0;
-      if (ci >= 0 && ci < NODE_COLORS.length) {
-        msg.color = NODE_COLORS[ci].value;
-        save();
-        openBranchDrawer();
-      }
-    }
+    openNodeColorPicker(msg);
   });
   menu.appendChild(colorBtn);
 
