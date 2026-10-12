@@ -628,6 +628,7 @@ function renderImageStream() {
     // 优先用内存缓存的 dataUrl；APK 模式下 fileName 非空但 dataUrl 为空时先占位，异步加载
     var imgSrc = img.dataUrl || '';
     var needAsync = !imgSrc && !!img.fileName;
+    var isExt = !!img.externalUrl;  // v120: 尚未落地的外链图
     // v69: 参考图缩略图示意（从 img.referenceImages 读取，不可点击）
     var refThumbsHtml = '';
     if (img.referenceImages && img.referenceImages.length > 0) {
@@ -639,13 +640,15 @@ function renderImageStream() {
     }
     html += '<div class="image-msg user"><div class="img-bubble"><p>' + escapeHtml(img.prompt || '(无提示词)') + '</p>' + refThumbsHtml + '</div></div>';
     html += '<div class="image-msg assistant"><div class="img-bubble"><div class="image-card">' +
-      '<img src="' + imgSrc + '" alt="生成的图片" data-image-id="' + img.id + '"' + (needAsync ? ' data-need-async="1"' : '') + '>' +
+      '<img src="' + imgSrc + '" alt="生成的图片" data-image-id="' + img.id + '"' + (needAsync ? ' data-need-async="1"' : '') + (isExt ? ' data-external="1"' : '') + '>' +
       '<div class="image-card-meta">' +
         '<span class="meta-tag">' + escapeHtml(img.model || '-') + '</span>' +
         '<span class="meta-tag">' + escapeHtml(img.actualSize || img.size || '-') + '</span>' +
         (img.negativePrompt ? '<span class="meta-tag">neg</span>' : '') +
+        (isExt ? '<span class="meta-tag meta-external">外链</span>' : '') +
       '</div>' +
       '<div class="image-card-actions">' +
+        (isExt ? '<button class="img-action-btn" data-action="refetch" data-id="' + img.id + '">重新下载</button>' : '') +
         '<button class="img-action-btn" data-action="save" data-id="' + img.id + '">保存到相册</button>' +
         '<button class="img-action-btn" data-action="delete" data-id="' + img.id + '">删除</button>' +
       '</div>' +
@@ -659,6 +662,8 @@ function renderImageStream() {
     if (imgObj) {
       getImageDataUrl(imgObj).then(function(dataUrl) {
         if (dataUrl) imgEl.src = dataUrl;
+        // v120: 读不出内容 = 历史空文件残骸，明确说明，而不是留一块灰底让人猜
+        else showBrokenImageNote(imgEl, imgObj);
       });
     }
   });
@@ -668,6 +673,23 @@ function renderImageStream() {
       showImagePreview(imgEl.src, imgEl.dataset.imageId);
     });
   });
+  // v120: 外链加载失败兜底（图床过期 / 临时不可达）——补一条可读提示，不让人对着一块灰底发愣
+  stream.querySelectorAll('img[data-external="1"]').forEach(function(imgEl) {
+    var showNote = function() {
+      if (imgEl.dataset.errShown) return;
+      imgEl.dataset.errShown = '1';
+      var card = imgEl.closest ? imgEl.closest('.image-card') : null;
+      if (card && !card.querySelector('.image-external-note')) {
+        var note = document.createElement('div');
+        note.className = 'image-external-note';
+        note.textContent = '外链暂时加载不出来（图床可能已过期）。可点「重新下载」重试，或稍后再看。';
+        card.insertBefore(note, imgEl.nextSibling);
+      }
+    };
+    imgEl.addEventListener('error', showNote);
+    // 绑定前就已失败的情况（缓存命中 error 可能同步触发，错过监听）
+    if (imgEl.complete && imgEl.naturalWidth === 0) showNote();
+  });
   // 绑定操作按钮
   stream.querySelectorAll('.img-action-btn').forEach(function(btn) {
     btn.addEventListener('click', function() {
@@ -675,6 +697,7 @@ function renderImageStream() {
       var id = btn.dataset.id;
       if (action === 'delete') deleteImageFromGallery(id);
       else if (action === 'save') saveImageToDevice(id);
+      else if (action === 'refetch') refetchExternalImage(id, false);
     });
   });
   // 滚到底部（最新内容）
@@ -693,6 +716,19 @@ function renderImageStream() {
     if (sb) { sb.classList.add('stopping'); sb.title = '点击停止生成'; }
   }
 }
+// v120: 「历史空文件残骸」的可读说明。
+//   v120 之前，外链下载失败时会把 URL 当 base64 写入，落下 0 字节文件并把地址一起丢掉 ——
+//   这些记录在磁盘上永远读不出内容。此处如实告知，并引导删除后重新生成。
+function showBrokenImageNote(imgEl, imgObj) {
+  var card = imgEl.closest ? imgEl.closest('.image-card') : null;
+  if (!card || card.querySelector('.image-external-note')) return;
+  var note = document.createElement('div');
+  note.className = 'image-external-note';
+  note.textContent = '这张图是旧版本留下的空文件：当时外链下载失败，地址被丢弃、只写入了一个 0 字节文件，无法恢复。建议删除后重新生成。';
+  card.insertBefore(note, imgEl.nextSibling);
+  if (imgObj) imgObj._broken = true;
+}
+
 // v66: 大图预览（支持双指缩放 + 拖动 + 工具栏保存/分享）
 var _previewGestureDestroy = null;
 function showImagePreview(src, imgId) {
@@ -950,16 +986,29 @@ function compressImageForGeneration(file) {
 var IMAGE_STORE_DIR = 'chatlite_images';  // Filesystem 目录名（DATA）
 
 // 把 dataUrl 写入 Filesystem，返回文件名（不含路径）
+// v120 守卫：此前对入参毫无校验，当外链 URL 被当作 dataUrl 传进来时，
+//   split(',') 取不到 base64 → data 写入空串 → 落下一个 0 字节文件，却返回文件名，
+//   调用方据此把 imgObj.dataUrl 置空、原始 URL 永久丢失（2026-10-12 实锤 9 张空文件）。
+//   现在：非 data URL 一律拒绝；base64 内容空或过短一律拒绝。
 async function writeImageFile(dataUrl, imgId) {
   if (!isCapacitor() || !CapFilesystem) return null;
+  if (typeof dataUrl !== 'string' || dataUrl.slice(0, 5) !== 'data:') {
+    console.warn('writeImageFile: 拒绝非 data URL 输入（避免写出空文件）:', String(dataUrl).slice(0, 80));
+    return null;
+  }
   try {
     var parts = dataUrl.split(',');
+    var b64 = parts[1] || '';
+    if (b64.length < 16) {
+      console.warn('writeImageFile: base64 内容为空或过短，拒绝写入');
+      return null;
+    }
     var mime = (parts[0].match(/data:(.*?);base64/) || [])[1] || 'image/png';
     var ext = mime === 'image/jpeg' ? 'jpg' : (mime === 'image/webp' ? 'webp' : 'png');
     var fileName = imgId + '.' + ext;
     await CapFilesystem.writeFile({
       path: IMAGE_STORE_DIR + '/' + fileName,
-      data: parts[1] || '',
+      data: b64,
       directory: 'DATA',
       recursive: true,
       encoding: 'utf8'  // base64 是 ASCII，用 utf8 直写
@@ -1059,7 +1108,10 @@ async function getImageDataUrl(img) {
   // APK 模式：从 Filesystem 读取
   if (img.fileName) {
     var dataUrl = await readImageFile(img.fileName);
-    if (dataUrl) {
+    // v120: 空文件读回的是 "data:image/png;base64,"（约 22 字符），并不是有效图片。
+    //   v120 之前「外链被写成空文件」留下的残骸会落到这里 —— 不再当作有效图片返回，
+    //   交由渲染层给出明确说明，而不是让人对着一张破图猜。
+    if (dataUrl && dataUrl.length > 100) {
       img.dataUrl = dataUrl;  // 缓存到内存，避免重复 IO
       return dataUrl;
     }
@@ -1342,34 +1394,47 @@ async function generateImage() {
     // v99: 多图计数——实际成功数 + 外链回退数（修复「虚报 N 张」黑箱 bug）
     var savedCount = 0;
     var fallbackCount = 0;
+    var pendingExternalIds = [];  // v120: 本次生成中回退成外链的图，稍后静默再试一次落地
     for (var i = 0; i < results.length; i++) {
       var item = results[i];
       var dataUrl = '';
+      var externalUrl = null;  // v120: 外链回退时保留原始地址（此前会被静默丢弃）
       if (item.b64_json) {
         var mime = (item.mime || item.media_type || 'image/png').toLowerCase();  // v107: 兼容 OpenRouter media_type
         dataUrl = 'data:' + mime + ';base64,' + item.b64_json;
       } else if (item.url) {
         // v99: 下载 URL 转 base64（30s 超时 + 20MB 上限）；失败回退外链并计数提示
+        // v120: 先补全相对地址；失败时保留外链（externalUrl），不再把它当 dataUrl 落盘
         state._imageProgress.phase = 'download';
         state._imageProgress.done = i;
         state._imageProgress.total = results.length;
-        dataUrl = await fetchImageAsDataUrl(item.url);
-        if (!dataUrl) { fallbackCount++; dataUrl = item.url; }
+        var absUrl = resolveImageUrl(item.url, req.url);
+        dataUrl = await fetchImageAsDataUrl(absUrl);
+        if (!dataUrl) {
+          fallbackCount++;
+          externalUrl = absUrl;
+          dataUrl = absUrl;  // 直接挂给 <img>，图床可访问时即可正常显示
+        }
       }
       if (!dataUrl) continue;
       // v68: 从 base64 解码实际像素尺寸（gpt-image-2 返回的图片常被压缩，实际尺寸 < 请求 size 参数）
-      var actualSize = parseImageActualSize(dataUrl) || '';
+      // v120: 外链未经 base64 编码，解析无意义（此前会白跑一次 atob 并可能误判）
+      var actualSize = externalUrl ? '' : (parseImageActualSize(dataUrl) || '');
       // 存入图库：APK 模式把 dataUrl 存 Filesystem，settings.images 只存元数据+fileName，避免 localStorage 配额超限
       var newImgId = uid();
       var fileName = null;
-      if (isCapacitor() && CapFilesystem) {
+      // v120: 外链一律不落盘——写下去只会得到一个 0 字节文件，并把 URL 一起丢掉
+      if (!externalUrl && isCapacitor() && CapFilesystem) {
         fileName = await writeImageFile(dataUrl, newImgId);
       }
+      if (externalUrl) pendingExternalIds.push(newImgId);
       var imgObj = {
         id: newImgId,
         // APK 模式 fileName 非空时不存 dataUrl（从 Filesystem 读）；浏览器模式或写入失败时仍存 dataUrl
         dataUrl: fileName ? null : dataUrl,
         fileName: fileName,
+        // v120: 外链地址永久保留，供「重新下载」与「打开链接」使用
+        externalUrl: externalUrl,
         thumbnailDataUrl: null,  // TODO: F2/F4 优化时再生成缩略图
         prompt: prompt,
         negativePrompt: negativePrompt,
@@ -1391,13 +1456,16 @@ async function generateImage() {
       settings.images.push(imgObj);
       savedCount++;
     }
+    // v120: 外链静默落地——隔 2.5s 再试一次下载（图床瞬时打嗝多半已恢复），
+    //   成功则替换为本地文件，用户无感；失败则保留外链（仍可直接显示，可手动「重新下载」）
+    if (pendingExternalIds.length > 0) scheduleExternalRefetch(pendingExternalIds, 2500);
     // v99: 成功后熔断清零
     clearFailStreak(state._imageProviderFailStreak, provider.id);
     saveImageProviders();
     renderImageStream();
     updateImageGalleryCount();
     if (indicator) indicator.className = 'image-status-indicator ok';
-    var doneMsg = '生成完成，共 ' + savedCount + ' 张' + (fallbackCount > 0 ? '（其中 ' + fallbackCount + ' 张为外链，可能过期）' : '');
+    var doneMsg = '生成完成，共 ' + savedCount + ' 张' + (fallbackCount > 0 ? '（其中 ' + fallbackCount + ' 张暂以外链显示，后台会自动重试下载）' : '');
     showToast(doneMsg, 'success');
     // v70: 无论前后台都发系统通知（前台 toast + 通知栏，后台仅通知栏）
     notifyImageComplete(savedCount);
@@ -1409,7 +1477,8 @@ async function generateImage() {
     var imgErr = e.imageError || classifyImageError(null, '', e);
     var errMsg;
     if (e.name === 'AbortError') {
-      errMsg = state._imageStopRequested ? '已停止生成' : (imgErr.hint || ('请求超时（' + Math.round(timeoutMs / 1000) + 's）'));
+      // v121: 优先用分类给出的 hint（停止 → 「已停止等待——服务端请求无法中止，可能仍在生成」）
+      errMsg = imgErr.hint || (state._imageStopRequested ? '已停止等待' : ('请求超时（' + Math.round(timeoutMs / 1000) + 's）'));
     } else {
       errMsg = imgErr.hint || (e.message || '生成失败');
       if (imgErr.attempts > 1) errMsg += '（已自动重试 ' + (imgErr.attempts - 1) + ' 次）';
@@ -1554,24 +1623,55 @@ function fetchWithImageRetry(opts) {
   async function attemptOnce(attempt) {
     var timeoutFired = false;
     var externalAborted = false;
-    if (signal && signal.aborted) externalAborted = true;
     var controller = new AbortController();
-    var timer = setTimeout(function() { timeoutFired = true; controller.abort(); }, timeoutMs);
-    if (signal && !signal.aborted) {
-      signal.addEventListener('abort', function() { externalAborted = true; controller.abort(); });
+
+    // v121: 生图 POST 在 APK 上走 CapacitorHttp 原生通道 —— native-bridge 的 fetch patch
+    //   只把 GET 交给本地代理，POST 走 cap.nativePromise 且**不传递 signal**。
+    //   后果：controller.abort() 之后 Promise 既不 resolve 也不 reject，界面会一直挂着，
+    //   而服务端请求其实仍在执行。故超时与「停止」统一改为「放弃等待」语义：
+    //   用 race 让 JS 侧立即脱身并如实告知（浏览器模式下 abort() 仍照常生效）。
+    var abandon = null;
+    var abandonPromise = new Promise(function(_, reject) { abandon = reject; });
+    abandonPromise.catch(function() {});  // 无人接管时静默，避免 unhandled rejection
+    function giveUp() {
+      if (abandon) { var f = abandon; abandon = null; f(new Error('__GIVE_UP__')); }
     }
+
+    function onSignalAbort() {
+      externalAborted = true;
+      controller.abort();  // 浏览器模式有效
+      giveUp();            // APK 原生通道靠这条脱身
+    }
+
+    if (signal && signal.aborted) {
+      externalAborted = true;
+      giveUp();
+    } else if (signal) {
+      signal.addEventListener('abort', onSignalAbort);
+    }
+
+    var timer = setTimeout(function() {
+      timeoutFired = true;
+      controller.abort();
+      giveUp();
+    }, timeoutMs);
+
     var resp;
     try {
-      resp = await fetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: (payload instanceof FormData) ? payload : JSON.stringify(payload),
-        signal: controller.signal
-      });
+      resp = await Promise.race([
+        fetch(url, {
+          method: 'POST',
+          headers: headers,
+          body: (payload instanceof FormData) ? payload : JSON.stringify(payload),
+          signal: controller.signal
+        }),
+        abandonPromise
+      ]);
     } catch(e) {
       if (externalAborted) {
-        var ue = new Error('已停止生成');
+        var ue = new Error('已停止等待');
         ue.name = 'AbortError';
+        ue.imageError = { type: 'aborted', retryable: false, hint: '已停止等待——服务端请求无法中止，可能仍在生成', status: null, attempts: attempt + 1 };
         throw ue;
       }
       if (timeoutFired) {
@@ -1588,6 +1688,7 @@ function fetchWithImageRetry(opts) {
       throw ne;
     } finally {
       clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onSignalAbort);  // v121: 防止多次重试累积监听器
     }
     var bodyText = '';
     try { bodyText = await resp.text(); } catch(e) { bodyText = ''; }
@@ -1820,41 +1921,174 @@ async function testImageProviderConnection() {
   }
 }
 
+// v120: 把相对 / 协议相对地址补全为绝对地址。
+//   中转站与图床偶有相对路径返回，此前会被 fetch 解析成 https://localhost/... 必然 404。
+function resolveImageUrl(rawUrl, baseUrl) {
+  if (!rawUrl) return rawUrl;
+  var u = String(rawUrl).trim();
+  if (/^(https?:|data:|blob:)/i.test(u)) return u;
+  try {
+    var base = baseUrl || location.href;
+    if (u.indexOf('//') === 0) return (new URL(base)).protocol + u;  // 协议相对
+    return new URL(u, base).toString();                              // 相对路径
+  } catch (e) {
+    return u;
+  }
+}
+
+// v120: 图片魔数校验——图床在"文件尚未就绪"时会返回 0 字节或错误页，
+//   HTTP 状态仍是 200，只有内容能识破。此前这类响应会被当成下载成功并写成空文件。
+var _IMG_MAGICS = [
+  [0x89, 0x50, 0x4E, 0x47],  // PNG
+  [0xFF, 0xD8, 0xFF],        // JPEG
+  [0x47, 0x49, 0x46, 0x38],  // GIF8
+  [0x52, 0x49, 0x46, 0x46]   // RIFF（WebP）
+];
+function looksLikeImage(bytes) {
+  for (var i = 0; i < _IMG_MAGICS.length; i++) {
+    var sig = _IMG_MAGICS[i];
+    var hit = true;
+    for (var j = 0; j < sig.length; j++) {
+      if (bytes[j] !== sig[j]) { hit = false; break; }
+    }
+    if (hit) return true;
+  }
+  return false;
+}
+
 // F1: 把图片 URL 下载为 data URL（避免外链失效）
 // v99: 加 30s 超时 + 20MB 大小上限；失败返回 null（由调用方回退外链并计数提示）
-async function fetchImageAsDataUrl(url) {
+// v120: 补三层校验（0 字节 / 非图片内容 / 空 data URL），并加一次重试
+async function fetchImageAsDataUrlOnce(url) {
   var controller = new AbortController();
   var timer = setTimeout(function() { controller.abort(); }, 30000);
   try {
     var resp = await fetch(url, { signal: controller.signal });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     var blob = await resp.blob();
+    if (blob.size === 0) throw new Error('响应为空（0 字节）');
     if (blob.size > 20 * 1024 * 1024) throw new Error('图片超过 20MB 上限');
+    var headBuf = await blob.slice(0, 8).arrayBuffer();
+    if (!looksLikeImage(new Uint8Array(headBuf))) throw new Error('返回内容不是图片（图床可能尚未就绪）');
     return await new Promise(function(resolve, reject) {
       var reader = new FileReader();
-      reader.onload = function() { resolve(reader.result); };
+      reader.onload = function() {
+        var r = reader.result;
+        // 双保险：空 blob 会产出 "data:xxx;base64," 这种极短串
+        if (typeof r !== 'string' || r.length < 100) { reject(new Error('解码结果为空')); return; }
+        resolve(r);
+      };
       reader.onerror = function() { reject(new Error('FileReader 失败')); };
       reader.readAsDataURL(blob);
     });
-  } catch(e) {
-    console.warn('fetchImageAsDataUrl failed, fallback to url:', e);
-    return null;
   } finally {
     clearTimeout(timer);
   }
 }
+
+async function fetchImageAsDataUrl(url) {
+  var lastErr = null;
+  for (var attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await fetchImageAsDataUrlOnce(url);
+    } catch (e) {
+      lastErr = e;
+      console.warn('fetchImageAsDataUrl 第 ' + (attempt + 1) + ' 次失败:', e && e.message);
+      if (attempt === 0) {
+        await new Promise(function(r) { setTimeout(r, 1200); });
+      }
+    }
+  }
+  console.warn('fetchImageAsDataUrl 最终失败，回退外链:', lastErr && lastErr.message);
+  return null;
+}
+
+// v120: 外链落地——把一张外链图重新下载为本地文件。
+//   成功：清空 externalUrl，形态与正常图完全一致（此后不受图床时效影响）
+//   silent=true 用于生成后的后台自动重试，不打扰用户
+async function refetchExternalImage(id, silent) {
+  var img = null;
+  var list = settings.images || [];
+  for (var i = 0; i < list.length; i++) { if (list[i].id === id) { img = list[i]; break; } }
+  if (!img) return false;
+  var url = img.externalUrl || ((img.dataUrl && img.dataUrl.slice(0, 5) !== 'data:') ? img.dataUrl : '');
+  if (!url) return false;
+  if (!silent) showToast('正在重新下载…', 'info');
+  var dataUrl = await fetchImageAsDataUrl(url);
+  if (!dataUrl) {
+    if (!silent) showToast('重新下载失败——图床可能已过期，可稍后再试', 'warn');
+    return false;
+  }
+  var fileName = null;
+  if (isCapacitor() && CapFilesystem) fileName = await writeImageFile(dataUrl, img.id);
+  img.dataUrl = fileName ? null : dataUrl;
+  img.fileName = fileName;
+  img.externalUrl = null;
+  img.actualSize = parseImageActualSize(dataUrl) || img.actualSize || '';
+  saveImageProviders();
+  renderImageStream();
+  if (!silent) showToast('已下载到本地', 'success');
+  return true;
+}
+
+// v120: 生成完成后延迟重试（逐张串行，避免同时压图床）
+function scheduleExternalRefetch(ids, delayMs) {
+  setTimeout(function () {
+    (function next(i) {
+      if (i >= ids.length) return;
+      refetchExternalImage(ids[i], true).then(function () {
+        setTimeout(function () { next(i + 1); }, 800);
+      }).catch(function () {
+        setTimeout(function () { next(i + 1); }, 800);
+      });
+    })(0);
+  }, delayMs || 2500);
+}
 // F1: 清空图库
-function clearImageGallery() {
+// v121: 同步删除磁盘文件。此前只清 settings.images，落盘文件全部沦为孤儿
+//   （设备实测：main 包 7 个、maintenance 包 21 个）—— 既占空间，又永远不会被回收。
+async function clearImageGallery() {
   if (!settings.images || settings.images.length === 0) {
     showToast('图库已为空', 'info');
     return;
   }
   if (!confirm('确定清空图库？共 ' + settings.images.length + ' 张图片，此操作不可撤销。')) return;
+  var files = settings.images.map(function(x) { return x.fileName; }).filter(Boolean);
   settings.images = [];
   saveImageProviders();
   renderImageStream();
   updateImageGalleryCount();
-  showToast('图库已清空', 'info');
+  var extra = 0;
+  if (isCapacitor() && CapFilesystem) {
+    for (var i = 0; i < files.length; i++) { deleteImageFile(files[i]); }
+    // 顺手回收历史遗留的孤儿文件（目录里有、但已无任何记录指向）
+    extra = await purgeOrphanImageFiles([]);
+  }
+  showToast('图库已清空' + (extra > 0 ? '（并清理了 ' + extra + ' 个历史遗留文件）' : ''), 'info');
+}
+
+// v121: 回收孤儿文件 —— 目录里存在、却没有任何图库记录指向的文件。
+//   keepNames：需要保留的文件名数组；返回实际清理的数量。
+async function purgeOrphanImageFiles(keepNames) {
+  if (!isCapacitor() || !CapFilesystem) return 0;
+  try {
+    var keep = {};
+    (keepNames || []).forEach(function(n) { keep[n] = 1; });
+    var res = await CapFilesystem.readdir({ path: IMAGE_STORE_DIR, directory: 'DATA' });
+    var list = (res && res.files) || [];
+    var removed = 0;
+    for (var i = 0; i < list.length; i++) {
+      var f = list[i];
+      if (f.type && f.type !== 'file') continue;
+      if (keep[f.name]) continue;
+      await deleteImageFile(f.name);
+      removed++;
+    }
+    return removed;
+  } catch (e) {
+    console.warn('purgeOrphanImageFiles failed:', e);
+    return 0;
+  }
 }
 
 // F1: 生图界面事件监听初始化
@@ -1983,7 +2217,8 @@ function initImageView() {
     if (state._imageGenerating && state._imageAbortController) {
       state._imageStopRequested = true;  // v99: 标记用户主动停止（区分超时）
       state._imageAbortController.abort();
-      showToast('已停止生成', 'info');
+      // v121: 如实告知——APK 走 CapacitorHttp 原生通道，请求无法真正中止
+      showToast('已停止等待（服务端可能仍在生成）', 'info');
     } else {
       generateImage();
     }
@@ -2153,4 +2388,12 @@ async function migrateImportedImagesToFilesystem() {
     renderImageStream();
     console.log('已迁移 ' + migrated + ' 张图片到 Filesystem');
   }
+  // v121: 顺带回收孤儿文件（导入覆盖、以及早期「清空图库不删文件」留下的无主文件）。
+  //   安全阀：记录为空时绝不动手 —— 无法区分「确实没有图」与「图库尚未加载完」，
+  //   宁可漏删，不可误删；用户主动清空图库那条路径由 clearImageGallery 负责收尾。
+  if (!images.length) return;
+  var keep = [];
+  for (var j = 0; j < images.length; j++) { if (images[j].fileName) keep.push(images[j].fileName); }
+  var removedCount = await purgeOrphanImageFiles(keep);
+  if (removedCount > 0) console.log('[image-gen] 已回收孤儿文件 ' + removedCount + ' 个');
 }
