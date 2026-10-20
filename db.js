@@ -131,6 +131,12 @@ function defaultSettings() {
     modelPrompts: {},
     // C5: 设置分组收折状态记忆 {groupKey: true=折叠/false=展开}
     groupCollapse: {},
+    // v123: 生图反馈振感（生成开始/完成/失败各一次轻反馈，默认开）
+    imageHaptic: true,
+    // v123: 每个生图渠道上次选中的模型 {providerId: model}，切渠道时恢复而不是覆盖
+    imageModelByProvider: {},
+    // v123: 最近使用过的生图提示词（最多 20 条，最新在前）
+    imageRecentPrompts: [],
     // F1: 生图 API 配置
     imageProviders: [],
     imageProviderId: null,
@@ -175,6 +181,10 @@ function migrateSettings(s) {
     s.imageProviderId = s.imageProviders.length > 0 ? s.imageProviders[0].id : null;
   }
   if (!Array.isArray(s.images)) s.images = [];
+  // v123: 生图相关的三个新字段（只增不改，老用户补默认值）
+  if (typeof s.imageHaptic !== 'boolean') s.imageHaptic = true;
+  if (!s.imageModelByProvider || typeof s.imageModelByProvider !== 'object') s.imageModelByProvider = {};
+  if (!Array.isArray(s.imageRecentPrompts)) s.imageRecentPrompts = [];
   return s;
 }
 
@@ -201,6 +211,10 @@ function saveSettings() {
       if (lite.dataUrl) lite.dataUrl = null;
       if (lite.referenceImages) lite.referenceImages = null;
       if (lite.thumbnailDataUrl) lite.thumbnailDataUrl = null;
+      // v124: v123 新增的缩略图内存副本。**只在有文件版时**剥离 ——
+      //   APK 模式靠 thumbName 读盘、不需要这段 base64；浏览器模式没有 Filesystem，
+      //   剥了就等于永远没有缩略图，所以保留。
+      if (lite.thumbName && lite.thumbDataUrl) lite.thumbDataUrl = null;
       return lite;
     });
   }

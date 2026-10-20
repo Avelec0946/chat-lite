@@ -1,4 +1,4 @@
-﻿/* ===== Reset & Base ===== */
+/* ===== Reset & Base ===== */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
 /* ===== Splash Screen（开屏动画）===== */
@@ -485,7 +485,18 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 .setting-group-collapsible > .setting-group-body{padding:12px}
 
 /* ===== F1: 生图界面（image-view）===== */
-.image-view{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;overflow:hidden;z-index:40;background:var(--bg);animation:fadeIn .2s}
+/* v123: 生图从「覆盖层」改为「主视图」——与 .main 同层并排在 #app 里，
+   不再低于 .sidebar(50)，也就不必靠 JS 手动隐藏侧栏来补层级缺陷。
+   position:fixed 保留（改动面最小），z-index 抬到 45：高于内容、低于侧栏之外的弹层。 */
+.image-view{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;overflow:hidden;z-index:45;background:var(--bg);animation:fadeIn .2s}
+/* 生图打开时侧栏仍可用：给它让出侧栏宽度（仅当侧栏未收起时） */
+body.image-view-open .image-view{left:var(--sidebar)}
+body.image-view-open.sidebar-hidden .image-view{left:0}
+@media (max-width: 768px) {
+  /* 窄屏侧栏是 80vw 固定抽屉，不再让宽度；且必须压在生图视图之上（否则抽屉打开时被盖住） */
+  body.image-view-open .image-view{left:0;z-index:55}
+  body.image-view-open .sidebar{z-index:60}
+}
 .image-bar{display:flex;align-items:center;gap:8px;padding:8px 16px;background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);box-shadow:var(--shadow);position:relative;z-index:1}
 .image-bar .btn-icon{flex-shrink:0}
 .image-bar .model-select{flex:1;max-width:none;min-width:0}
@@ -497,7 +508,10 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 .image-status-indicator.err{background:var(--danger)}
 
 /* 图片流（对话流式展示） */
-.image-stream{flex:1;overflow-y:auto;padding:16px 0;position:relative;-webkit-overflow-scrolling:touch}
+/* v124: 显式声明 display:block —— 此前只写了 flex:1，靠「未声明 display 的普通块」这个隐式默认成立；
+   一旦上游（皮肤/注入样式/其它构建）把它变成 flex 容器，纵向流式就会横排、卡片被撑宽、
+   顶部「显示更早」按钮也会被挤出可点区域。写明意图，别让它依赖默认值。 */
+.image-stream{display:block;flex:1;overflow-y:auto;padding:16px 0;position:relative;-webkit-overflow-scrolling:touch}
 .image-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text2);gap:8px;text-align:center;padding:24px}
 .image-empty h2{font-size:20px;font-weight:300;color:var(--text);margin-top:8px}
 .image-empty p{font-size:14px}
@@ -519,7 +533,10 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 
 /* 生成的图片卡片 */
 .image-card{display:flex;flex-direction:column;gap:6px;max-width:100%}
-.image-card img{max-width:100%;max-height:60vh;border-radius:12px;display:block;cursor:pointer;background:var(--bg3);box-shadow:var(--shadow)}
+.image-card img{max-width:100%;max-height:60vh;border-radius:12px;display:block;cursor:pointer;background:var(--bg3);box-shadow:var(--shadow);
+  /* v124: 长按要出我们自己的菜单，必须关掉系统「保存图片 / 打开图片」的原生长按菜单，
+     否则真机上系统菜单会先抢走这次长按（对话气泡那边也是这么处理的，见 .msg-bubble）。 */
+  -webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 .image-card-meta{font-size:12px;color:var(--text2);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .image-card-meta .meta-tag{padding:1px 6px;border-radius:4px;background:var(--bg3);font-size:11px}
 /* v120: 外链图标记 + 加载失败提示 */
@@ -583,6 +600,15 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 
 /* F1: 生图 Provider 编辑器（复用 .provider-editor 结构） */
 .image-provider-editor{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-top:8px}
+/* v124: 生图 API 编辑器套用 v122 定下的设置面板排版规格 ——
+   此前它用的是 .card-field（12px/400/次级色），与 .setting-row>span:first-child（13px/500/主色）
+   完全不在同一条规则上，于是同一个面板里「名称」比别处小一号、还更淡（实测 13 个字段全中）。
+   这里用后代选择器补齐，不动 .card-field 本身（对话侧的角色卡编辑器还在用它）。 */
+.image-provider-editor .card-field > span:first-child{font-size:13px;font-weight:500;color:var(--text);line-height:1.35}
+.image-provider-editor .card-field{margin-bottom:12px}
+.image-provider-editor .card-field > .setting-hint,
+.image-provider-editor .setting-hint{margin:3px 0 0}
+.image-provider-editor .provider-editor-actions{margin-top:14px}
 .image-provider-test-result{font-size:12px;margin-top:6px;padding:6px 10px;border-radius:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text2);min-height:16px}
 .image-provider-test-result.ok{color:var(--success);border-color:var(--success);background:var(--bg3)}
 .image-provider-test-result.err{color:var(--danger);border-color:var(--danger);background:var(--bg3)}
@@ -599,10 +625,52 @@ body:not(.capacitor-mode) .capacitor-only{display:none !important}
 .image-preview-toolbar button:active{background:rgba(255,255,255,.3)}
 .image-preview-hint{position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.6);font-size:12px;z-index:201;pointer-events:none}
 
+/* ===== v123: 生图交互一致性 ===== */
+
+/* 模型下拉（与接口下拉并排；窄屏下允许收缩） */
+.image-model-select{flex:1;max-width:none;min-width:0;max-width:180px}
+
+/* 最近提示词胶囊（输入框上方一行，可横向滚动） */
+.image-recent-prompts{display:flex;gap:6px;align-items:center;margin-bottom:8px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;padding-bottom:2px}
+.image-recent-prompts::-webkit-scrollbar{display:none}
+.image-recent-pill{flex-shrink:0;max-width:180px;padding:4px 10px;border:1px solid var(--border);border-radius:999px;background:var(--bg2);color:var(--text2);font-size:12px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .15s,border-color .15s}
+.image-recent-pill:hover,.image-recent-pill:active{color:var(--primary);border-color:var(--primary)}
+
+/* 用户气泡里「实际发送内容」的折叠块（前缀/模板造成的差异，默认收起） */
+.img-prompt-final{margin-top:6px;font-size:12px;opacity:.85}
+.img-prompt-final summary{cursor:pointer;color:inherit;opacity:.75}
+.img-prompt-final pre{margin:6px 0 0;padding:6px 8px;border-radius:6px;background:rgba(0,0,0,.18);white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.5;max-height:140px;overflow-y:auto}
+
+/* 错误条上的按钮（复用 .continue-btn，去掉渐变以区别于「继续生成」） */
+.image-error-dismiss{background:transparent;color:inherit;border-color:currentColor;opacity:.7}
+.image-error-dismiss:hover{opacity:1;filter:none}
+
+/* 空态里的「去配置」引导按钮 */
+.image-empty-cta{margin-top:14px;padding:8px 18px;border:1px solid var(--primary);border-radius:999px;background:transparent;color:var(--primary);font-size:13px;cursor:pointer;transition:background .15s,color .15s}
+.image-empty-cta:hover,.image-empty-cta:active{background:var(--primary);color:var(--on-primary)}
+
+/* 「显示更早」 */
+.image-load-earlier{display:flex;justify-content:center;padding:8px 0 12px}
+.image-load-earlier .img-action-btn{border:1px solid var(--border);background:var(--bg2);color:var(--text2);font-size:12px;padding:6px 14px;border-radius:999px}
+.image-load-earlier .img-action-btn:hover{color:var(--primary);border-color:var(--primary)}
+
+/* 缩略图加载中的占位底色（避免列表在图片到达前是一片空白方块） */
+.image-card img{background:var(--bg3)}
+
+/* v124: 空图库 + 有错误时，让错误条有位置。
+   .image-empty 是 height:100% 的居中容器，错误条 append 在它后面会被挤出可视区
+   （v123 实测只剩顶部一条边）。这里在 has-error 状态下改成纵向排布、空态不再吃满高度。 */
+.image-stream.has-error{display:flex;flex-direction:column}
+.image-stream.has-error .image-empty{height:auto;flex:0 0 auto;padding:32px 16px 8px}
+.image-stream.has-error .interrupted-bar{margin:0 16px 16px}
+
 /* v66: 生图停止按钮（生成中 sendBtn 变停止按钮） */
 .image-send-btn.stopping{background:var(--danger);animation:pulseStop 1s ease-in-out infinite}
+/* v123: 同坑位双图标 —— 空闲 ▶ / 生成中 ■（与对话界面 btn-send ↔ btn-stop 同构） */
+.image-send-btn .icon-stop{display:none}
+.image-send-btn.stopping .icon-send{display:none}
+.image-send-btn.stopping .icon-stop{display:block}
 @keyframes pulseStop{0%,100%{opacity:1}50%{opacity:.6}}
-.image-stop-hint{position:absolute;top:8px;left:50%;transform:translateX(-50%);background:var(--danger);color:var(--on-primary);padding:4px 12px;border-radius:12px;font-size:11px;z-index:10;animation:fadeIn .2s}
 
 /* ===== v116: LaTeX (KaTeX) 渲染适配 ===== */
 /* KaTeX 不声明 color，公式色继承所在消息文本色 —— 明暗主题自动适配，无需分别维护 */
